@@ -17,13 +17,20 @@
 
 每个模块通过自己的 PR 接受审核，后续模块基于合并后的版本开发。源文件按职责划分，公开接口记录单位和输入约定，版本化存储格式，记录第三方来源和实际功能。
 
-## 当前可验证功能
+## 运行桌面工作台
 
-场景配置、本地账户与项目存储均使用 Python 标准库。使用 Python 3.12 运行测试。
+在 Windows 上用独立的 Python 3.12 环境安装 Qt 依赖。以下命令使用 `uv` 创建环境，以避免使用 Conda 基础环境中已有的 Qt 库。
 
 ```powershell
-python -m unittest discover -s tests -v
+uv venv --managed-python --python 3.12 .venv
+uv pip install --python .venv/Scripts/python.exe -r requirements.txt
+.venv/Scripts/python.exe -m guard_workbench.desktop
+.venv/Scripts/python.exe -m unittest discover -s tests -v
 ```
+
+启动后设置本地账号并创建项目。左侧选择项目，右侧填写场景、观测扰动并添加障碍物。中央是城市模板的俯视示意，滑块按配置预览目标位置和障碍物生效时间。用「保存场景」或 `Ctrl+S` 保存修改。工作区默认位于当前用户的本地应用数据目录，可使用 `--workspace` 指定另一个 SQLite 文件。当前界面支持编辑与预览，仿真执行将在后续模块接入。
+
+## 数据接口
 
 `SceneConfig` 默认选择城市遮挡模板，目标沿模板路线正向以 0.7 m/s 行进。方向可切换为反向。行人和车辆可分别指定 0–4 个和 0–1 辆，预留给模板内已有的四组行人位与一个车辆位。障碍物使用相对于场景原点的北向、东向坐标，以米记录尺寸，可指定出现及消失时间。光照以无量纲有效增益表示。模块只负责参数及文件，场景资产和参数如何进入仿真由 AirSim 后端实现。
 
