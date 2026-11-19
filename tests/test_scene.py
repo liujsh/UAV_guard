@@ -14,6 +14,9 @@ class SceneConfigTests(unittest.TestCase):
             pedestrian_count=3,
             vehicle_count=1,
             obstacles=(Obstacle(4, -2, 2.0, 0.8, 2.5, 15, 45),),
+            measurement_noise_m=0.55,
+            observation_delay_s=1.6,
+            observation_blackout_s=4.0,
         )
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "scene.json"
@@ -30,11 +33,18 @@ class SceneConfigTests(unittest.TestCase):
             {"pedestrian_count": 5},
             {"vehicle_count": True},
             {"seed": -1},
+            {"duration_s": 2, "observation_delay_s": 3},
             {"duration_s": 20, "obstacles": (Obstacle(0, 0, 1, 1, 1, 15, 45),)},
         )
         for fields in cases:
             with self.subTest(fields=fields), self.assertRaises(ValueError):
                 SceneConfig(**fields)
+
+    def test_earlier_documents_default_to_no_added_delay_or_blackout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "scene.json"
+            path.write_text('{"format_version": 1, "scene": {"seed": 15}}', encoding="utf-8")
+            self.assertEqual(load_scene(path), SceneConfig(seed=15))
 
     def test_obstacle_window_is_start_inclusive_and_end_exclusive(self):
         obstacle = Obstacle(0, 0, 1, 1, 1, start_s=2, end_s=5)
