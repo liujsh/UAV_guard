@@ -1,0 +1,25 @@
+{
+  "SettingsVersion": 1.2,
+  "SimMode": "Multirotor",
+  "ApiServerPort": 41451,
+  "LocalHostIp": "127.0.0.1",
+  "ViewMode": "NoDisplay",
+  "EngineSound": false,
+  "ExternalCameras": {
+    "Workbench": {
+      "X": -42,
+      "Y": -73,
+      "Z": -43,
+      "Pitch": -56,
+      "Yaw": 44,
+      "Roll": 0,
+      "CaptureSettings": [
+        {"ImageType": 0, "Width": 640, "Height": 480, "FOV_Degrees": 60},
+        {"ImageType": 5, "Width": 640, "Height": 480, "FOV_Degrees": 60}
+      ]
+    }
+  },
+  "Vehicles": {
+    "GuardDrone": {"VehicleType": "SimpleFlight", "AutoCreate": true}
+  }
+}
