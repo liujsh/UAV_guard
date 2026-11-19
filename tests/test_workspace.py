@@ -72,7 +72,33 @@ class WorkspaceTests(unittest.TestCase):
 
     def test_future_database_version_is_rejected(self):
         with sqlite3.connect(self.path) as database:
-            database.execute("PRAGMA user_version = 2")
+            database.execute("PRAGMA user_version = 999")
         database.close()
         with self.assertRaisesRegex(ValueError, "数据库版本"):
             Workspace(self.path)
+
+    def test_run_snapshot_survives_edit_and_schema_upgrade(self):
+        self.workspace.set_up_account("实验员", "example-password")
+        project = self.workspace.create_project("雨天观测", SceneConfig(seed=17))
+        with sqlite3.connect(self.path) as database:
+            database.execute("DROP TABLE simulation_run")
+            database.execute("PRAGMA user_version = 1")
+        database.close()
+
+        upgraded = Workspace(self.path)
+        self.assertTrue(upgraded.sign_in("实验员", "example-password"))
+        run = upgraded.start_run(project.project_id, "offline-cv-v1")
+        upgraded.save_project_scene(project.project_id, SceneConfig(seed=18))
+        upgraded.finish_run(run.info.run_id, "completed", result={"samples": [1]})
+        with self.assertRaises(ValueError):
+            upgraded.finish_run(run.info.run_id, "cancelled")
+
+        reopened = Workspace(self.path)
+        with self.assertRaises(PermissionError):
+            reopened.open_run(run.info.run_id)
+        self.assertTrue(reopened.sign_in("实验员", "example-password"))
+        self.assertEqual(reopened.open_project(project.project_id).scene.seed, 18)
+        stored = reopened.open_run(run.info.run_id)
+        self.assertEqual(stored.scene.seed, 17)
+        self.assertEqual(stored.result, {"samples": [1]})
+        self.assertEqual(reopened.list_runs(project.project_id)[0].status, "completed")

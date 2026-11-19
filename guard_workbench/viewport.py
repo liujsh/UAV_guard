@@ -6,14 +6,13 @@ from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QGraphicsScene, QGraphicsView
 
+from .route import URBAN_ROUTE, target_position
 from .scene import SceneConfig
 
 
 # Coordinates in meters relative to the target's start, ordered as north/east.
-_ROUTE = ((0, 0), (16, 0), (16, 12), (0, 12))
 _BUILDING_NORTH_EAST = (8, 6)
 _BASE_FRAME = QRectF(-10, -24, 34, 32)
-_ROUTE_LENGTH = sum(math.dist(start, end) for start, end in zip(_ROUTE, (*_ROUTE[1:], _ROUTE[0])))
 
 
 def _point(north: float, east: float) -> QPointF:
@@ -25,21 +24,6 @@ def _pen(color: str, width: float = 1.0) -> QPen:
     pen.setWidthF(width)
     pen.setCosmetic(True)
     return pen
-
-
-def _target_at(scene: SceneConfig, elapsed_s: float) -> QPointF:
-    route = _ROUTE
-    if scene.target_route_direction == "reverse":
-        route = (route[0], *reversed(route[1:]))
-    segments = tuple(zip(route, (*route[1:], route[0])))
-    distance = elapsed_s * scene.target_speed_mps % _ROUTE_LENGTH
-    for start, end in segments:
-        length = math.dist(start, end)
-        if distance < length:
-            ratio = distance / length
-            return _point(start[0] + ratio * (end[0] - start[0]), start[1] + ratio * (end[1] - start[1]))
-        distance -= length
-    return _point(*route[0])
 
 
 class SceneViewport(QGraphicsView):
@@ -66,7 +50,7 @@ class SceneViewport(QGraphicsView):
                 color = "#edb76d" if obstacle.is_active(elapsed_s) else "#6e5c49"
                 drawing.addRect(footprint, _pen(color, 1.4), QColor("#4a382b")).setZValue(2)
 
-            corners = [_point(*corner) for corner in _ROUTE]
+            corners = [_point(*corner) for corner in URBAN_ROUTE]
             route = QPainterPath(corners[0])
             for point in corners[1:]:
                 route.lineTo(point)
@@ -82,7 +66,7 @@ class SceneViewport(QGraphicsView):
             for corner in corners:
                 drawing.addEllipse(corner.x() - 0.20, corner.y() - 0.20, 0.4, 0.4,
                                    _pen("#52cabc"), QColor("#52cabc")).setZValue(1)
-            target = _target_at(config, elapsed_s)
+            target = _point(*target_position(elapsed_s * config.target_speed_mps, config.target_route_direction))
             drawing.addEllipse(target.x() - 0.36, target.y() - 0.36, 0.72, 0.72,
                                _pen("#bef9ee", 2), QColor("#48c7b5")).setZValue(3)
 

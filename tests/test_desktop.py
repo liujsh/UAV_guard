@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -9,6 +10,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QInputDialog
 
 from guard_workbench.desktop import MainWindow, _LoginDialog
+from guard_workbench.offline import SimulationCancelled
 from guard_workbench.scene import Obstacle, SceneConfig
 from guard_workbench.scene_editor import SceneEditor, _ObstacleDialog
 from guard_workbench.workspace import Workspace
@@ -63,3 +65,63 @@ class DesktopTests(unittest.TestCase):
         confirm.click()
         self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
         self.assertEqual(dialog.obstacle.end_s, 8)
+
+    def test_run_button_saves_edits_and_persists_worker_result(self):
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        workspace = Workspace(Path(directory) / "workspace.sqlite3")
+        workspace.set_up_account("实验员", "test-password")
+        project = workspace.create_project("城市实验")
+        window = MainWindow(workspace)
+        window.show()
+        self.addCleanup(window.hide)
+        window.projects.setCurrentRow(0)
+        window.editor.seed.setText("123")
+        QTest.mouseClick(window.runs.start_button, Qt.MouseButton.LeftButton)
+        self._wait_for_worker(window)
+
+        info, = workspace.list_runs(project.project_id)
+        run = workspace.open_run(info.run_id)
+        self.assertEqual(info.status, "completed")
+        self.assertEqual(run.scene.seed, 123)
+        self.assertEqual(run.result["summary"]["samples"], 301)
+        self.assertEqual(len(run.result["samples"]), 301)
+        self.assertIn("已完成", window.runs.history.item(0).text())
+
+    def test_cancelled_and_failed_tasks_are_persisted_without_result(self):
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        workspace = Workspace(Path(directory) / "workspace.sqlite3")
+        workspace.set_up_account("实验员", "test-password")
+        project = workspace.create_project("城市实验")
+        window = MainWindow(workspace)
+        self.addCleanup(window.hide)
+        window.projects.setCurrentRow(0)
+        def wait_for_cancel(scene, *, cancelled, on_progress):
+            deadline = time.monotonic() + 2
+            while not cancelled() and time.monotonic() < deadline:
+                time.sleep(0.005)
+            if not cancelled():
+                raise RuntimeError("Cancellation was not received")
+            raise SimulationCancelled()
+
+        with patch("guard_workbench.run_panel.run_offline", side_effect=wait_for_cancel):
+            window.runs.start()
+            window.runs.cancel_button.click()
+            self._wait_for_worker(window)
+        info, = workspace.list_runs(project.project_id)
+        self.assertEqual(info.status, "cancelled")
+        self.assertIsNone(workspace.open_run(info.run_id).result)
+
+        with (patch("guard_workbench.run_panel.run_offline", side_effect=RuntimeError("测试任务失败")),
+              self.assertLogs("guard_workbench.run_panel", level="ERROR")):
+            window.runs.start()
+            self._wait_for_worker(window)
+        failed = workspace.list_runs(project.project_id)[0]
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual(failed.message, "测试任务失败")
+        self.assertIsNone(workspace.open_run(failed.run_id).result)
+
+    def _wait_for_worker(self, window):
+        deadline = time.monotonic() + 5
+        while window.runs.busy and time.monotonic() < deadline:
+            QTest.qWait(10)
+        self.assertFalse(window.runs.busy)
