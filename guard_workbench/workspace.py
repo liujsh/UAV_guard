@@ -3,8 +3,10 @@
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from hashlib import pbkdf2_hmac
 from hmac import compare_digest
+import json
 from pathlib import Path
 from secrets import token_bytes
 import sqlite3
@@ -13,7 +15,7 @@ from uuid import uuid4
 from .scene import SceneConfig, decode_scene, encode_scene
 
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _PASSWORD_ROUNDS = 600_000
 
 
@@ -41,6 +43,24 @@ class Project:
     scene: SceneConfig
 
 
+@dataclass(frozen=True, slots=True)
+class RunInfo:
+    run_id: str
+    project_id: str
+    backend: str
+    status: str
+    started_at: str
+    finished_at: str | None
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
+class RunRecord:
+    info: RunInfo
+    scene: SceneConfig
+    result: dict | None
+
+
 class Workspace:
     """Persist projects in one local database and keep sign-in state in memory."""
 
@@ -51,6 +71,8 @@ class Workspace:
         with self._connection() as database:
             database.execute("BEGIN IMMEDIATE")
             version = database.execute("PRAGMA user_version").fetchone()[0]
+            if not 0 <= version <= _SCHEMA_VERSION:
+                raise ValueError(f"不支持的工作区数据库版本：{version}")
             if version == 0:
                 database.execute("""
                     CREATE TABLE account (
@@ -68,14 +90,28 @@ class Workspace:
                         scene_json TEXT NOT NULL
                     )
                 """)
+            if version < 2:
+                database.execute("""
+                    CREATE TABLE simulation_run (
+                        run_id TEXT PRIMARY KEY NOT NULL,
+                        project_id TEXT NOT NULL REFERENCES project(id),
+                        backend TEXT NOT NULL,
+                        status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed', 'cancelled')),
+                        started_at TEXT NOT NULL,
+                        finished_at TEXT,
+                        message TEXT NOT NULL,
+                        scene_json TEXT NOT NULL,
+                        result_json TEXT
+                    )
+                """)
+                database.execute("CREATE INDEX simulation_run_project ON simulation_run(project_id, started_at)")
                 database.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
-            elif version != _SCHEMA_VERSION:
-                raise ValueError(f"不支持的工作区数据库版本：{version}")
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
         with closing(sqlite3.connect(self._database_path)) as database, database:
             database.row_factory = sqlite3.Row
+            database.execute("PRAGMA foreign_keys = ON")
             yield database
 
     @property
@@ -167,3 +203,55 @@ class Workspace:
             )
             if result.rowcount != 1:
                 raise KeyError("项目不存在")
+
+    @staticmethod
+    def _run_info(row: sqlite3.Row) -> RunInfo:
+        return RunInfo(*(row[key] for key in RunInfo.__dataclass_fields__))
+
+    def start_run(self, project_id: str, backend: str) -> RunRecord:
+        """Create a run with an independent snapshot of the saved project scene."""
+        self._require_sign_in()
+        run_id = uuid4().hex
+        started = datetime.now(UTC).isoformat()
+        with self._connection() as database:
+            row = database.execute("""
+                INSERT INTO simulation_run (run_id, project_id, backend, status, started_at, message, scene_json)
+                SELECT ?, id, ?, 'running', ?, '', scene_json FROM project WHERE id = ?
+                RETURNING scene_json
+            """, (run_id, backend, started, project_id)).fetchone()
+            if row is None:
+                raise KeyError("项目不存在")
+            scene = decode_scene(row["scene_json"])
+        return RunRecord(RunInfo(run_id, project_id, backend, "running", started, None, ""), scene, None)
+
+    def finish_run(self, run_id: str, status: str, *, message: str = "", result: dict | None = None) -> None:
+        """Persist one terminal status and its result atomically."""
+        self._require_sign_in()
+        if status not in ("completed", "failed", "cancelled") or (status == "completed") != (result is not None):
+            raise ValueError("任务结束状态与结果不匹配")
+        contents = json.dumps(result, ensure_ascii=False, allow_nan=False) if result is not None else None
+        with self._connection() as database:
+            update = database.execute("""
+                UPDATE simulation_run SET status = ?, finished_at = ?, message = ?, result_json = ?
+                WHERE run_id = ? AND status = 'running'
+            """, (status, datetime.now(UTC).isoformat(), message, contents, run_id))
+            if update.rowcount != 1:
+                raise ValueError("没有可结束的运行记录")
+
+    def list_runs(self, project_id: str) -> list[RunInfo]:
+        self._require_sign_in()
+        with self._connection() as database:
+            rows = database.execute("""
+                SELECT run_id, project_id, backend, status, started_at, finished_at, message
+                FROM simulation_run WHERE project_id = ? ORDER BY started_at DESC, run_id DESC
+            """, (project_id,)).fetchall()
+        return [self._run_info(row) for row in rows]
+
+    def open_run(self, run_id: str) -> RunRecord:
+        self._require_sign_in()
+        with self._connection() as database:
+            row = database.execute("SELECT * FROM simulation_run WHERE run_id = ?", (run_id,)).fetchone()
+        if row is None:
+            raise KeyError("运行记录不存在")
+        result = json.loads(row["result_json"]) if row["result_json"] is not None else None
+        return RunRecord(self._run_info(row), decode_scene(row["scene_json"]), result)

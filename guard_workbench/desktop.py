@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QPushButton, QSizePolicy, QSlider, QSplitter, QVBoxLayout, QWidget,
 )
 
+from .run_panel import RunPanel
 from .scene_editor import SceneEditor
 from .viewport import SceneViewport
 from .workspace import Project, Workspace
@@ -120,7 +121,7 @@ class MainWindow(QMainWindow):
         self.project: Project | None = None
         self._pending_changes = False
         self.setWindowTitle(TITLE)
-        self.setMinimumSize(960, 610)
+        self.setMinimumSize(960, 650)
         self.resize(1260, 760)
 
         central = QWidget()
@@ -187,6 +188,9 @@ class MainWindow(QMainWindow):
         self.time_label.setMinimumWidth(65)
         timeline.addWidget(self.time_label)
         middle.addLayout(timeline)
+        self.runs = RunPanel(workspace)
+        self.runs.requested.connect(self._run_offline)
+        middle.addWidget(self.runs)
         panes.addWidget(preview)
 
         details = QWidget()
@@ -199,7 +203,7 @@ class MainWindow(QMainWindow):
         panes.setStretchFactor(1, 1)
         panes.setSizes([220, 700, 325])
 
-        self.statusBar().addPermanentWidget(_label("离线配置", "muted"))
+        self.statusBar().addPermanentWidget(_label("本地工作区", "muted"))
         self.save_shortcut = QShortcut(QKeySequence.StandardKey.Save, self)
         self.save_shortcut.activated.connect(self.save)
         self._set_project(None)
@@ -243,6 +247,7 @@ class MainWindow(QMainWindow):
         if project is not None:
             self.editor.load_scene(project.scene)
         self._refresh_preview()
+        self.runs.set_project(project.project_id if project else None)
         self.statusBar().showMessage("场景已加载" if project else "请选择或新建一个项目")
 
     def _refresh_preview(self) -> None:
@@ -283,6 +288,10 @@ class MainWindow(QMainWindow):
         self.project_label.setText(self.project.name)
         self.statusBar().showMessage("场景已保存")
         return True
+
+    def _run_offline(self) -> None:
+        if self.project is not None and (not self._pending_changes or self.save()):
+            self.runs.start()
 
     def _allow_leave(self) -> bool:
         if not self._pending_changes:
@@ -341,6 +350,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "无法重命名项目", str(error))
 
     def _sign_out(self) -> None:
+        if self.runs.busy:
+            self.statusBar().showMessage("请等待离线任务结束，或先取消运行")
+            return
         if not self._allow_leave():
             return
         self.workspace.sign_out()
@@ -355,7 +367,10 @@ class MainWindow(QMainWindow):
             QApplication.quit()
 
     def closeEvent(self, event) -> None:
-        if self._allow_leave():
+        if self.runs.busy:
+            self.statusBar().showMessage("请等待离线任务结束，或先取消运行")
+            event.ignore()
+        elif self._allow_leave():
             event.accept()
         else:
             event.ignore()
