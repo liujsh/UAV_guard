@@ -95,9 +95,9 @@ def _unique_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return fields
 
 
-def load_scene(path: Path) -> SceneConfig:
-    """Load and validate a saved scene configuration."""
-    payload = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_unique_fields)
+def decode_scene(contents: str) -> SceneConfig:
+    """Validate and deserialize the versioned scene document."""
+    payload = json.loads(contents, object_pairs_hook=_unique_fields)
     if not isinstance(payload, dict) or set(payload) != {"format_version", "scene"}:
         raise ValueError("配置必须包含 format_version 和 scene")
     version = payload["format_version"]
@@ -121,10 +121,20 @@ def load_scene(path: Path) -> SceneConfig:
         raise ValueError(f"scene 字段无效：{error}") from error
 
 
+def encode_scene(config: SceneConfig) -> str:
+    """Serialize the scene to the shared file and database format."""
+    payload = {"format_version": FORMAT_VERSION, "scene": asdict(config)}
+    return json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+
+
+def load_scene(path: Path) -> SceneConfig:
+    """Load and validate a saved scene configuration."""
+    return decode_scene(path.read_text(encoding="utf-8"))
+
+
 def save_scene(path: Path, config: SceneConfig) -> None:
     """Write a complete scene snapshot before replacing the previous file."""
-    payload = {"format_version": FORMAT_VERSION, "scene": asdict(config)}
-    contents = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+    contents = encode_scene(config)
     temporary_path = None
     try:
         with tempfile.NamedTemporaryFile(
