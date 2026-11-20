@@ -189,7 +189,7 @@ class MainWindow(QMainWindow):
         timeline.addWidget(self.time_label)
         middle.addLayout(timeline)
         self.runs = RunPanel(workspace)
-        self.runs.requested.connect(self._run_offline)
+        self.runs.requested.connect(self._start_simulation)
         middle.addWidget(self.runs)
         panes.addWidget(preview)
 
@@ -289,7 +289,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("场景已保存")
         return True
 
-    def _run_offline(self) -> None:
+    def _start_simulation(self) -> None:
         if self.project is not None and (not self._pending_changes or self.save()):
             self.runs.start()
 
@@ -351,7 +351,7 @@ class MainWindow(QMainWindow):
 
     def _sign_out(self) -> None:
         if self.runs.busy:
-            self.statusBar().showMessage("请等待离线任务结束，或先取消运行")
+            self.statusBar().showMessage("请等待仿真任务结束，或先取消运行")
             return
         if not self._allow_leave():
             return
@@ -368,7 +368,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         if self.runs.busy:
-            self.statusBar().showMessage("请等待离线任务结束，或先取消运行")
+            self.statusBar().showMessage("请等待仿真任务结束，或先取消运行")
             event.ignore()
         elif self._allow_leave():
             event.accept()

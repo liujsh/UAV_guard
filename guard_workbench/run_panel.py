@@ -1,5 +1,6 @@
 """Qt task controls and persistent offline run history."""
 
+from base64 import b64decode
 from dataclasses import asdict
 from datetime import datetime
 import logging
@@ -7,12 +8,14 @@ import sqlite3
 from threading import Event
 
 from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
-    QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox,
-    QProgressBar, QPushButton, QVBoxLayout, QWidget,
+    QComboBox, QDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox,
+    QProgressBar, QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
-from .offline import OFFLINE_BACKEND, OfflineResult, SimulationCancelled, run_offline
+from .airsim_backend import AIRSIM_BACKEND, AirSimEndpoint, run_airsim
+from .offline import OFFLINE_BACKEND, SimulationCancelled, run_offline
 from .workspace import RunRecord, Workspace
 
 
@@ -23,31 +26,35 @@ def _local_time(timestamp: str) -> str:
     return datetime.fromisoformat(timestamp).astimezone().strftime("%m-%d %H:%M:%S")
 
 
-class _OfflineWorker(QThread):
+class _SimulationWorker(QThread):
     progress = Signal(int)
 
-    def __init__(self, workspace: Workspace, run: RunRecord, parent: QWidget) -> None:
+    def __init__(self, workspace: Workspace, run: RunRecord, endpoint: AirSimEndpoint | None,
+                 parent: QWidget) -> None:
         super().__init__(parent)
         self.workspace = workspace
         self.record = run
+        self.endpoint = endpoint
         self.stop_requested = Event()
         self.save_error: str | None = None
 
     def run(self) -> None:
-        result: OfflineResult | None = None
+        result = None
+        callbacks = {"cancelled": self.stop_requested.is_set, "on_progress": self.progress.emit}
         try:
-            result = run_offline(self.record.scene, cancelled=self.stop_requested.is_set,
-                                 on_progress=self.progress.emit)
+            if self.endpoint is None:
+                result = asdict(run_offline(self.record.scene, **callbacks))
+            else:
+                result = run_airsim(self.record.scene, self.endpoint, **callbacks)
         except SimulationCancelled:
             status, message = "cancelled", "用户取消运行"
         except Exception as error:
-            logging.getLogger(__name__).exception("Offline run failed")
+            logging.getLogger(__name__).exception("Simulation run failed")
             status, message = "failed", str(error)
         else:
-            status, message = "completed", "已保存轨迹、误差和不确定性时间序列"
+            status, message = "completed", "已保存运行时间序列"
         try:
-            self.workspace.finish_run(self.record.info.run_id, status, message=message,
-                                      result=asdict(result) if result is not None else None)
+            self.workspace.finish_run(self.record.info.run_id, status, message=message, result=result)
         except (ValueError, sqlite3.Error) as error:
             self.save_error = str(error)
 
@@ -59,13 +66,18 @@ class RunPanel(QWidget):
         super().__init__()
         self.workspace = workspace
         self.project_id: str | None = None
-        self.worker: _OfflineWorker | None = None
+        self.worker: _SimulationWorker | None = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 6, 0, 0)
         toolbar = QHBoxLayout()
-        title = QLabel("离线仿真")
+        title = QLabel("仿真任务")
         title.setObjectName("section")
         toolbar.addWidget(title)
+        self.backend = QComboBox()
+        self.backend.addItem("离线估计", OFFLINE_BACKEND)
+        self.backend.addItem("AirSim", AIRSIM_BACKEND)
+        self.backend.setAccessibleName("仿真后端")
+        toolbar.addWidget(self.backend)
         self.progress = QProgressBar()
         self.progress.setAccessibleName("任务进度")
         self.progress.hide()
@@ -82,6 +94,19 @@ class RunPanel(QWidget):
         self.details_button.clicked.connect(self._show_details)
         toolbar.addWidget(self.details_button)
         layout.addLayout(toolbar)
+        self.connection = QWidget()
+        connection = QHBoxLayout(self.connection)
+        connection.setContentsMargins(0, 0, 0, 0)
+        connection.addWidget(QLabel("AirSim 本地端口"))
+        self.port = QSpinBox()
+        self.port.setRange(1, 65535)
+        self.port.setValue(41451)
+        self.port.setAccessibleName("AirSim 本地端口")
+        connection.addWidget(self.port)
+        connection.addStretch()
+        self.connection.hide()
+        self.backend.currentIndexChanged.connect(self._show_connection)
+        layout.addWidget(self.connection)
         self.history = QListWidget()
         self.history.setAccessibleName("历史运行")
         self.history.setMaximumHeight(88)
@@ -101,12 +126,14 @@ class RunPanel(QWidget):
     def start(self) -> None:
         if self.project_id is None or self.busy:
             return
+        backend = self.backend.currentData()
         try:
-            record = self.workspace.start_run(self.project_id, OFFLINE_BACKEND)
+            endpoint = AirSimEndpoint(self.port.value()) if backend == AIRSIM_BACKEND else None
+            record = self.workspace.start_run(self.project_id, backend)
         except (KeyError, ValueError, sqlite3.Error) as error:
             QMessageBox.warning(self, "无法启动任务", str(error))
             return
-        self.worker = _OfflineWorker(self.workspace, record, self)
+        self.worker = _SimulationWorker(self.workspace, record, endpoint, self)
         self.worker.progress.connect(self.progress.setValue)
         self.worker.finished.connect(self._finish)
         self.progress.reset()
@@ -145,14 +172,20 @@ class RunPanel(QWidget):
                 active = self.worker.record.info.run_id if self.worker is not None else None
                 for record in records:
                     status = "运行中" if active == record.run_id else _STATUSES[record.status]
-                    item = QListWidgetItem(f"{_local_time(record.started_at)}   ·   {status}", self.history)
+                    backend = "AirSim" if record.backend == AIRSIM_BACKEND else "离线估计"
+                    item = QListWidgetItem(f"{_local_time(record.started_at)}   ·   {backend}   ·   {status}", self.history)
                     item.setData(Qt.ItemDataRole.UserRole, record.run_id)
                 if records:
                     self.history.setCurrentRow(0)
         self._update_actions()
 
+    def _show_connection(self) -> None:
+        self.connection.setVisible(self.backend.currentData() == AIRSIM_BACKEND)
+
     def _update_actions(self) -> None:
         self.start_button.setEnabled(self.project_id is not None and not self.busy)
+        self.backend.setEnabled(not self.busy)
+        self.port.setEnabled(not self.busy)
         self.details_button.setEnabled(self.history.currentItem() is not None)
 
     def _show_details(self) -> None:
@@ -172,13 +205,40 @@ class RunPanel(QWidget):
                      f"    遮挡：{run.scene.observation_blackout_s:g} s")
         if info.finished_at:
             lines.extend((f"结束：{_local_time(info.finished_at)}", info.message))
+        airsim = info.backend == AIRSIM_BACKEND
         if run.result is not None:
             summary = run.result["summary"]
-            lines.extend((f"时间样本：{summary['samples']}    已接收观测：{summary['received_observations']}",
-                          f"位置 RMSE：{summary['rmse_m']:.3f} m",
-                          f"95% 预测椭圆覆盖率：{summary['coverage_95']:.1%}"))
+            lines.append(f"时间样本：{summary['samples']}    已接收观测：{summary['received_observations']}")
+            if airsim:
+                lines.extend((f"相机可见比例：{summary['visibility_fraction']:.1%}",
+                              f"平均相机距离：{summary['mean_camera_distance_m']:.2f} m"))
+            else:
+                lines.extend((f"位置 RMSE：{summary['rmse_m']:.3f} m",
+                              f"95% 预测椭圆覆盖率：{summary['coverage_95']:.1%}"))
+        if airsim and run.result is not None:
+            self._show_airsim_result(lines, run.result["last_frame_png"])
+            return
         dialog = QMessageBox(self)
-        dialog.setWindowTitle("离线仿真详情")
+        dialog.setWindowTitle("AirSim 仿真详情" if airsim else "离线仿真详情")
         dialog.setTextFormat(Qt.TextFormat.PlainText)
         dialog.setText("\n".join(lines))
+        dialog.exec()
+
+    def _show_airsim_result(self, lines: list[str], frame: str) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("AirSim 仿真详情")
+        layout = QVBoxLayout(dialog)
+        details = QLabel("\n".join(lines))
+        details.setTextFormat(Qt.TextFormat.PlainText)
+        layout.addWidget(details)
+        pixmap = QPixmap()
+        if pixmap.loadFromData(b64decode(frame), "PNG"):
+            layout.addWidget(QLabel("AirSim 相机末帧"))
+            image = QLabel()
+            image.setPixmap(pixmap.scaled(640, 420, Qt.AspectRatioMode.KeepAspectRatio,
+                                          Qt.TransformationMode.SmoothTransformation))
+            layout.addWidget(image)
+        close = QPushButton("关闭")
+        close.clicked.connect(dialog.accept)
+        layout.addWidget(close)
         dialog.exec()
