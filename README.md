@@ -46,6 +46,19 @@ uv pip install --python .venv/Scripts/python.exe -r requirements.txt
 
 将 `GUARD_WORKBENCH_AIRSIM_TEST_PORT` 设为专用实例的本地端口后，运行测试会额外执行真实 AirSim 的定时障碍遮挡、取消和清理验证。
 
+### 结果与回放
+
+在历史列表选择已完成的任务并打开「运行详情」。轨迹按北向、东向米制坐标绘制，离线任务同时提供误差和预测椭圆面积，AirSim 提供距离、目标像素数和可见性。播放按钮和时间滑块按原始采样点回放。对照列表只显示当前项目、同一后端的已完成任务，两次运行按各自从零开始的任务时间叠加。导出 CSV 包含当前及对照运行的原始样本、运行编号、后端和种子。
+
+### 构建 Windows 体验包
+
+```powershell
+uv pip install --python .venv/Scripts/python.exe -r requirements-build.txt
+powershell -ExecutionPolicy Bypass -File packaging/build-windows.ps1
+```
+
+双击 `dist/UAVGuardWorkbench/UAVGuardWorkbench.exe` 启动。复制或解压时保留整个 `UAVGuardWorkbench` 目录及其中的 `_internal`。此为免安装体验构建，AirSim 仍使用独立的 Blocks 实例。
+
 ## 数据接口
 
 `SceneConfig` 默认选择城市遮挡模板，目标沿模板路线正向以 0.7 m/s 行进。方向可切换为反向。行人和车辆可分别指定 0–4 个和 0–1 辆，预留给模板内已有的四组行人位与一个车辆位。障碍物使用相对于场景原点的北向、东向坐标，以米记录尺寸，可指定出现及消失时间。光照以无量纲有效增益表示。模块只负责参数及文件，场景资产和参数如何进入仿真由 AirSim 后端实现。

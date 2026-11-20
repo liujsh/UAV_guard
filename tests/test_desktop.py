@@ -1,3 +1,4 @@
+from dataclasses import asdict
 import os
 from pathlib import Path
 import tempfile
@@ -10,7 +11,8 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QInputDialog
 
 from guard_workbench.desktop import MainWindow, _LoginDialog
-from guard_workbench.offline import SimulationCancelled
+from guard_workbench.offline import OFFLINE_BACKEND, SimulationCancelled, run_offline
+from guard_workbench.result_dialog import ResultDialog
 from guard_workbench.scene import Obstacle, SceneConfig
 from guard_workbench.scene_editor import SceneEditor, _ObstacleDialog
 from guard_workbench.workspace import Workspace
@@ -125,3 +127,24 @@ class DesktopTests(unittest.TestCase):
         while window.runs.busy and time.monotonic() < deadline:
             QTest.qWait(10)
         self.assertFalse(window.runs.busy)
+
+    def test_result_dialog_compares_and_scrubs_completed_runs(self):
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        workspace = Workspace(Path(directory) / "workspace.sqlite3")
+        workspace.set_up_account("实验员", "test-password")
+        project = workspace.create_project("对照实验", SceneConfig(duration_s=2))
+        for _ in range(2):
+            record = workspace.start_run(project.project_id, OFFLINE_BACKEND)
+            workspace.finish_run(record.info.run_id, "completed", result=asdict(run_offline(record.scene)))
+        dialog = ResultDialog(workspace, workspace.open_run(record.info.run_id), [], None)
+        self.addCleanup(dialog.close)
+        dialog.show()
+        dialog.selection.setCurrentIndex(1)
+        dialog.metric_picker.setCurrentText("位置误差")
+        dialog.slider.setValue(5)
+        self.assertEqual(len(dialog.chart.series), 2)
+        self.assertEqual(dialog.time_label.text(), "1.0 s")
+        self.assertFalse(dialog.grab().isNull())
+        dialog.play.click()
+        dialog.close()
+        self.assertFalse(dialog.timer.isActive())
