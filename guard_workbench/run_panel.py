@@ -1,6 +1,5 @@
 """Qt task controls and persistent offline run history."""
 
-from base64 import b64decode
 from dataclasses import asdict
 from datetime import datetime
 import logging
@@ -8,14 +7,14 @@ import sqlite3
 from threading import Event
 
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox,
+    QComboBox, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox,
     QProgressBar, QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from .airsim_backend import AIRSIM_BACKEND, AirSimEndpoint, run_airsim
 from .offline import OFFLINE_BACKEND, SimulationCancelled, run_offline
+from .result_dialog import ResultDialog
 from .workspace import RunRecord, Workspace
 
 
@@ -215,30 +214,17 @@ class RunPanel(QWidget):
             else:
                 lines.extend((f"位置 RMSE：{summary['rmse_m']:.3f} m",
                               f"95% 预测椭圆覆盖率：{summary['coverage_95']:.1%}"))
-        if airsim and run.result is not None:
-            self._show_airsim_result(lines, run.result["last_frame_png"])
+        if run.result is not None:
+            try:
+                dialog = ResultDialog(self.workspace, run, lines, self)
+            except (ValueError, KeyError, sqlite3.Error) as error:
+                QMessageBox.warning(self, "无法读取结果图表", str(error))
+                return
+            dialog.exec()
+            dialog.deleteLater()
             return
         dialog = QMessageBox(self)
         dialog.setWindowTitle("AirSim 仿真详情" if airsim else "离线仿真详情")
         dialog.setTextFormat(Qt.TextFormat.PlainText)
         dialog.setText("\n".join(lines))
-        dialog.exec()
-
-    def _show_airsim_result(self, lines: list[str], frame: str) -> None:
-        dialog = QDialog(self)
-        dialog.setWindowTitle("AirSim 仿真详情")
-        layout = QVBoxLayout(dialog)
-        details = QLabel("\n".join(lines))
-        details.setTextFormat(Qt.TextFormat.PlainText)
-        layout.addWidget(details)
-        pixmap = QPixmap()
-        if pixmap.loadFromData(b64decode(frame), "PNG"):
-            layout.addWidget(QLabel("AirSim 相机末帧"))
-            image = QLabel()
-            image.setPixmap(pixmap.scaled(640, 420, Qt.AspectRatioMode.KeepAspectRatio,
-                                          Qt.TransformationMode.SmoothTransformation))
-            layout.addWidget(image)
-        close = QPushButton("关闭")
-        close.clicked.connect(dialog.accept)
-        layout.addWidget(close)
         dialog.exec()
