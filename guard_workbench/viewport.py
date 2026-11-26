@@ -39,7 +39,7 @@ class SceneViewport(QGraphicsView):
     def show_scene(self, config: SceneConfig | None, elapsed_s: float = 0) -> None:
         drawing = self._drawing
         drawing.clear()
-        drawing.setBackgroundBrush(QColor("#0d171c"))
+        drawing.setBackgroundBrush(QColor("#0E1013"))
         frame = QRectF(_BASE_FRAME)
         if config is not None:
             for obstacle in config.obstacles:
@@ -47,32 +47,32 @@ class SceneViewport(QGraphicsView):
                 footprint = QRectF(center.x() - obstacle.width_m / 2, center.y() - obstacle.length_m / 2,
                                    obstacle.width_m, obstacle.length_m)
                 frame = frame.united(footprint.adjusted(-4, -4, 4, 4))
-                color = "#edb76d" if obstacle.is_active(elapsed_s) else "#6e5c49"
-                drawing.addRect(footprint, _pen(color, 1.4), QColor("#4a382b")).setZValue(2)
+                color = "#E76624" if obstacle.is_active(elapsed_s) else "#62564A"
+                drawing.addRect(footprint, _pen(color, 1.4), QColor("#2D2722")).setZValue(2)
 
             corners = [_point(*corner) for corner in URBAN_ROUTE]
             route = QPainterPath(corners[0])
             for point in corners[1:]:
                 route.lineTo(point)
             route.closeSubpath()
-            drawing.addPath(route, _pen("#253b42", 16), QColor("#142229"))
-            route_pen = _pen("#52cabc", 2)
+            drawing.addPath(route, _pen("#242B33", 16), QColor("#171C22"))
+            route_pen = _pen("#338CED", 2)
             route_pen.setStyle(Qt.PenStyle.DashLine)
             drawing.addPath(route, route_pen).setZValue(1)
 
             center = _point(*_BUILDING_NORTH_EAST)
             drawing.addRect(center.x() - 4.3, center.y() - 2.3, 8.6, 4.6,
-                            _pen("#60757e", 2), QColor("#293941")).setZValue(1)
+                            _pen("#65717D", 2), QColor("#272D35")).setZValue(1)
             for corner in corners:
                 drawing.addEllipse(corner.x() - 0.20, corner.y() - 0.20, 0.4, 0.4,
-                                   _pen("#52cabc"), QColor("#52cabc")).setZValue(1)
+                                   _pen("#338CED"), QColor("#338CED")).setZValue(1)
             target = _point(*target_position(elapsed_s * config.target_speed_mps, config.target_route_direction))
             drawing.addEllipse(target.x() - 0.36, target.y() - 0.36, 0.72, 0.72,
-                               _pen("#bef9ee", 2), QColor("#48c7b5")).setZValue(3)
+                               _pen("#E6E8EB", 2), QColor("#338CED")).setZValue(3)
 
         # Keep grid line counts bounded for scenes with distant obstacles.
         step = max(2, math.ceil(max(frame.width(), frame.height()) / 36))
-        grid_pen = _pen("#203037")
+        grid_pen = _pen("#1F242B")
         for east in range(math.ceil(frame.left() / step) * step, math.floor(frame.right()) + 1, step):
             drawing.addLine(east, frame.top(), east, frame.bottom(), grid_pen).setZValue(-1)
         for screen_y in range(math.ceil(frame.top() / step) * step, math.floor(frame.bottom()) + 1, step):
