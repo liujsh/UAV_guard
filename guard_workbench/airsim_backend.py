@@ -150,8 +150,29 @@ def _world(endpoint: AirSimEndpoint, cancelled: Callable[[], bool]) -> Iterator[
             world.cleanup(paused)
 
 
+def inspect_airsim(endpoint: AirSimEndpoint) -> dict:
+    """Check a dedicated instance without pausing it or creating scene objects."""
+    with AirSimRPC("127.0.0.1", endpoint.port) as rpc:
+        if rpc.call("ping") is not True:
+            raise ConnectionError("AirSim 未确认连接")
+        server_version = rpc.call("getServerVersion")
+        cube = next((name for name in rpc.call("simListAssets") if name.casefold() == "cube"), None)
+        if cube is None:
+            raise ValueError("AirSim 场景缺少 Cube 资产")
+        remaining = rpc.call("simListSceneObjects", "GuardWorkbench_.*")
+        if remaining:
+            raise RuntimeError(f"专用实例仍有工作台对象：{', '.join(remaining)}")
+        camera = _xyz(rpc.call("simGetCameraInfo", _CAMERA, "", True)["pose"]["position"])
+        if _target_pixels(_image(rpc, 5)[0]):
+            raise ValueError("场景已使用目标分割颜色，请清理专用 Blocks 实例")
+        image, stamp = _image(rpc, 0)
+        return {"server_version": server_version, "camera": _CAMERA,
+                "camera_position": camera, "image_timestamp_ns": stamp, "frame_png": image}
+
+
 def run_airsim(scene: SceneConfig, endpoint: AirSimEndpoint, *,
-               cancelled: Callable[[], bool], on_progress: Callable[[int], None]) -> dict:
+               cancelled: Callable[[], bool], on_progress: Callable[[int], None],
+               on_camera_frame: Callable[[bytes, int], None] | None = None) -> dict:
     if cancelled():
         raise SimulationCancelled()
     n = math.floor(scene.duration_s * _RATE_HZ) + 1
@@ -165,6 +186,7 @@ def run_airsim(scene: SceneConfig, endpoint: AirSimEndpoint, *,
     samples = []
     captured: dict[int, tuple[float, float]] = {}
     last_progress = -1
+    last_rgb: bytes | None = None
 
     with _world(endpoint, cancelled) as world:
         rpc = world.rpc
@@ -228,8 +250,14 @@ def run_airsim(scene: SceneConfig, endpoint: AirSimEndpoint, *,
             if progress != last_progress:
                 on_progress(progress)
                 last_progress = progress
+            if on_camera_frame is not None and (tick % _RATE_HZ == 0 or tick == n - 1):
+                last_rgb, rgb_stamp = _image(rpc, 0)
+                on_camera_frame(last_rgb, rgb_stamp)
 
-        image, _ = _image(rpc, 0)
+        if last_rgb is None:
+            image, _ = _image(rpc, 0)
+        else:
+            image = last_rgb
 
     return {"summary": {"samples": n, "server_version": server_version,
                         "visibility_fraction": sum(row["visible"] for row in samples) / n,

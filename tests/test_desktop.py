@@ -1,4 +1,5 @@
 from dataclasses import asdict
+from io import BytesIO
 import os
 from pathlib import Path
 import tempfile
@@ -9,7 +10,9 @@ from unittest.mock import patch
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QInputDialog
+from PIL import Image
 
+from guard_workbench.camera_view import CameraView
 from guard_workbench.desktop import MainWindow, _LoginDialog
 from guard_workbench.offline import OFFLINE_BACKEND, SimulationCancelled, run_offline
 from guard_workbench.result_dialog import ResultDialog
@@ -46,7 +49,7 @@ class DesktopTests(unittest.TestCase):
         window.editor.seed.setText("4294967295")
         window.time_slider.setValue(128)
         self.assertTrue(window._pending_changes)
-        self.assertEqual(window.time_label.text(), "12.8 s")
+        self.assertEqual(window.time_label.text(), "12.8 s / 60 s")
         self.assertIn("*", window.project_label.text())
         QTest.mouseClick(window.save_button, Qt.MouseButton.LeftButton)
         self.assertFalse(window._pending_changes)
@@ -68,6 +71,31 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
         self.assertEqual(dialog.obstacle.end_s, 8)
 
+    def test_airsim_preflight_displays_real_frame_without_blocking_ui(self):
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        workspace = Workspace(Path(directory) / "workspace.sqlite3")
+        workspace.set_up_account("实验员", "test-password")
+        workspace.create_project("连接检查")
+        window = MainWindow(workspace)
+        window.show()
+        self.addCleanup(window.hide)
+        with BytesIO() as buffer:
+            Image.new("RGB", (16, 12), (20, 30, 40)).save(buffer, format="PNG")
+            frame = buffer.getvalue()
+        self.assertFalse(window.camera.show_frame(b"not-a-png"))
+        result = {"server_version": 181, "image_timestamp_ns": 123456, "frame_png": frame}
+        with patch("guard_workbench.run_panel.inspect_airsim", return_value=result) as inspect:
+            window.runs.backend.setCurrentIndex(1)
+            window.runs.check_button.click()
+            deadline = time.monotonic() + 5
+            while window.runs.preflight is not None and time.monotonic() < deadline:
+                QTest.qWait(10)
+            inspect.assert_called_once()
+        self.assertIsNone(window.runs.preflight)
+        self.assertIn("可连接", window.runs.connection_state.text())
+        self.assertFalse(window.camera._pixmap.isNull())
+        self.assertIn("123456", window.camera.timestamp.text())
+
     def test_run_button_saves_edits_and_persists_worker_result(self):
         directory = self.enterContext(tempfile.TemporaryDirectory())
         workspace = Workspace(Path(directory) / "workspace.sqlite3")
@@ -87,7 +115,8 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(run.scene.seed, 123)
         self.assertEqual(run.result["summary"]["samples"], 301)
         self.assertEqual(len(run.result["samples"]), 301)
-        self.assertIn("已完成", window.runs.history.item(0).text())
+        self.assertIn("已完成", window.runs.history.item(0, 2).text())
+        self.assertIn("任务结束", workspace.read_run_log(info.run_id))
 
     def test_cancelled_and_failed_tasks_are_persisted_without_result(self):
         directory = self.enterContext(tempfile.TemporaryDirectory())
@@ -143,7 +172,7 @@ class DesktopTests(unittest.TestCase):
         dialog.metric_picker.setCurrentText("位置误差")
         dialog.slider.setValue(5)
         self.assertEqual(len(dialog.chart.series), 2)
-        self.assertEqual(dialog.time_label.text(), "1.0 s")
+        self.assertEqual(dialog.time_label.text(), "1.0 s / 2.0 s")
         self.assertFalse(dialog.grab().isNull())
         dialog.play.click()
         dialog.close()

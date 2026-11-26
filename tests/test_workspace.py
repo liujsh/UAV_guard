@@ -90,6 +90,10 @@ class WorkspaceTests(unittest.TestCase):
         run = upgraded.start_run(project.project_id, "offline-cv-v1")
         upgraded.save_project_scene(project.project_id, SceneConfig(seed=18))
         upgraded.finish_run(run.info.run_id, "completed", result={"samples": [1]})
+        upgraded.append_run_log(run.info.run_id, "固定测试日志")
+        self.assertIn("固定测试日志", upgraded.read_run_log(run.info.run_id))
+        with self.assertRaises(ValueError):
+            upgraded.run_log_path("../outside")
         with self.assertRaises(ValueError):
             upgraded.finish_run(run.info.run_id, "cancelled")
 

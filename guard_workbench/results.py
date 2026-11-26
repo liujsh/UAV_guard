@@ -21,6 +21,7 @@ class Series:
     color: str
     points: tuple[tuple[float, float], ...]
     times: tuple[float, ...]
+    dashed: bool = False
 
 
 def metrics(backend: str) -> dict[str, tuple[str, str]]:
@@ -33,17 +34,17 @@ def chart_data(runs: list[RunRecord], metric: str) -> tuple[list[Series], str, s
     for index, run in enumerate(runs):
         rows = run.result["samples"]
         times = tuple(row["time_s"] for row in rows)
-        primary, secondary = (("#5dd6bf", "#87a8ee"), ("#f1ba72", "#de92bb"))[index]
+        color = ("#338CED", "#E76624")[index]
         label = "本次" if index == 0 else "对照"
         if metric == TRAJECTORY:
             truth = tuple((row["truth_east_m"], row["truth_north_m"]) for row in rows)
-            series.append(Series(label + "真值", primary, truth, times))
+            series.append(Series(label + "真值", color, truth, times))
             if run.info.backend != AIRSIM_BACKEND:
                 estimate = tuple((row["estimate_east_m"], row["estimate_north_m"]) for row in rows)
-                series.append(Series(label + "估计", secondary, estimate, times))
+                series.append(Series(label + "估计", color, estimate, times, dashed=True))
         else:
             field, unit = metrics(run.info.backend)[metric]
-            series.append(Series(label, primary, tuple((row["time_s"], float(row[field])) for row in rows), times))
+            series.append(Series(label, color, tuple((row["time_s"], float(row[field])) for row in rows), times))
     return (series, "东向 / m", "北向 / m") if metric == TRAJECTORY else (series, "时间 / s", unit)
 
 

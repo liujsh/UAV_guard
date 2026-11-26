@@ -1,56 +1,27 @@
-"""Native desktop entry point and project navigation."""
+"""Native desktop entry point and dock-based research workspace."""
 
 import argparse
 from pathlib import Path
 import sqlite3
 
-from PySide6.QtCore import QStandardPaths, Qt
-from PySide6.QtGui import QFont, QKeySequence, QShortcut
+from PySide6.QtCore import QStandardPaths, Qt, QTimer
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QApplication, QDialog, QDialogButtonBox, QFormLayout, QFrame, QHBoxLayout,
-    QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
-    QMessageBox, QPushButton, QSizePolicy, QSlider, QSplitter, QVBoxLayout, QWidget,
+    QApplication, QDialog, QDialogButtonBox, QDockWidget, QFormLayout, QFrame,
+    QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QMainWindow, QMessageBox, QPushButton, QSizePolicy, QSlider, QSplitter,
+    QToolBar, QVBoxLayout, QWidget,
 )
 
+from .camera_view import CameraView
 from .run_panel import RunPanel
 from .scene_editor import SceneEditor
+from .theme import apply_theme
 from .viewport import SceneViewport
 from .workspace import Project, Workspace
 
 
 TITLE = "无人机守卫仿真工作台"
-_STYLE = """
-QWidget { background: #141e24; color: #deebee; }
-QLabel#title { font-size: 21px; font-weight: 700; }
-QLabel#section { font-size: 14px; font-weight: 700; }
-QLabel#muted { color: #97aeb5; }
-QLabel#error { color: #ffc081; }
-QFrame#toolbar { background: #1b292f; border-bottom: 1px solid #30434b; }
-QFrame#toolbar QLabel { background: transparent; }
-QPushButton { color: #e1eef0; background: #23343b; border: 1px solid #3b515b;
-              border-radius: 5px; padding: 6px 11px; }
-QPushButton:hover { background: #304650; }
-QPushButton#primary { background: #4ac2b0; color: #10221f; font-weight: 700; }
-QPushButton#primary:hover { background: #72d7c7; }
-QPushButton:disabled, QPushButton#primary:disabled { color: #8aa3ab; background: #212d33; }
-QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QListWidget {
-    background: #101a20; color: #deebee; border: 1px solid #344a54;
-    border-radius: 4px; padding: 4px 6px; selection-background-color: #28584f;
-}
-QLineEdit:focus, QAbstractSpinBox:focus, QComboBox:focus { border-color: #50bdaf; }
-QListWidget::item { padding: 8px 5px; border-radius: 4px; }
-QListWidget::item:selected { background: #28584f; color: #eefaf7; }
-QTabWidget::pane { border: 1px solid #30434b; }
-QTabBar::tab { background: #1a282f; color: #a6bcc2; padding: 9px 12px; }
-QTabBar::tab:selected { background: #243942; color: #9fecde; border-bottom: 2px solid #4bc4b2; }
-QGraphicsView { border: 1px solid #31464e; }
-QSplitter::handle { background: #26373f; }
-QSlider::groove:horizontal { height: 4px; background: #253740; border-radius: 2px; }
-QSlider::sub-page:horizontal { background: #41897e; border-radius: 2px; }
-QSlider::handle:horizontal { width: 12px; margin: -4px 0; border-radius: 6px; background: #58c8b7; }
-QSlider::handle:horizontal:disabled { background: #43565e; }
-QStatusBar { background: #17262d; border-top: 1px solid #30434b; }
-"""
 
 
 def _label(text: str, appearance: str) -> QLabel:
@@ -69,10 +40,13 @@ class _LoginDialog(QDialog):
         self.setMinimumWidth(410)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 22, 24, 22)
+        layout.setSpacing(12)
         layout.addWidget(_label(TITLE, "title"))
         hint = "首次使用，请设置本地账号和 8–128 位密码。" if self.first_launch else "登录以打开本地项目。"
         layout.addWidget(_label(hint, "muted"))
         form = QFormLayout()
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(10)
         self.user = QLineEdit()
         self.user.setMaxLength(40)
         self.password = QLineEdit()
@@ -120,39 +94,38 @@ class MainWindow(QMainWindow):
         self.workspace = workspace
         self.project: Project | None = None
         self._pending_changes = False
+        self._running_project_id: str | None = None
         self.setWindowTitle(TITLE)
-        self.setMinimumSize(960, 650)
-        self.resize(1260, 760)
+        self.setMinimumSize(1100, 700)
+        self.resize(1440, 860)
+        self.setDockNestingEnabled(True)
+        self.setAnimated(False)
 
-        central = QWidget()
-        layout = QVBoxLayout(central)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        self.setCentralWidget(central)
-        header = QFrame()
-        header.setObjectName("toolbar")
-        bar = QHBoxLayout(header)
-        bar.setContentsMargins(18, 9, 16, 9)
-        bar.addWidget(_label(TITLE, "title"))
-        bar.addStretch()
-        self.account_label = _label(workspace.username or "", "muted")
-        bar.addWidget(self.account_label)
+        toolbar = QToolBar("主工具栏")
+        toolbar.setMovable(False)
+        toolbar.setFloatable(False)
+        toolbar.setContextMenuPolicy(Qt.ContextMenuPolicy.PreventContextMenu)
+        self.addToolBar(toolbar)
+        toolbar.addWidget(_label(TITLE, "title"))
+        toolbar.addSeparator()
         self.save_button = QPushButton("保存场景")
         self.save_button.setObjectName("primary")
         self.save_button.clicked.connect(self.save)
-        bar.addWidget(self.save_button)
+        toolbar.addWidget(self.save_button)
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        spacer.setStyleSheet("background: transparent;")
+        toolbar.addWidget(spacer)
+        self.account_label = _label(workspace.username or "", "muted")
+        toolbar.addWidget(self.account_label)
         exit_button = QPushButton("退出登录")
         exit_button.clicked.connect(self._sign_out)
-        bar.addWidget(exit_button)
-        layout.addWidget(header)
+        toolbar.addWidget(exit_button)
 
-        panes = QSplitter(Qt.Orientation.Horizontal)
-        panes.setChildrenCollapsible(False)
-        layout.addWidget(panes, 1)
         projects = QWidget()
-        projects.setMinimumWidth(185)
         left = QVBoxLayout(projects)
-        left.addWidget(_label("项目", "section"))
+        left.setContentsMargins(8, 8, 8, 8)
+        left.setSpacing(8)
         self.projects = QListWidget()
         self.projects.setAccessibleName("项目列表")
         self.projects.currentItemChanged.connect(self._select_project)
@@ -165,20 +138,46 @@ class MainWindow(QMainWindow):
         actions.addWidget(create)
         actions.addWidget(self.rename_button)
         left.addLayout(actions)
-        panes.addWidget(projects)
+        self.project_dock = QDockWidget("项目导航", self)
+        self.project_dock.setObjectName("projectDock")
+        self.project_dock.setWidget(projects)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.project_dock)
 
-        preview = QWidget()
-        middle = QVBoxLayout(preview)
+        central = QWidget()
+        middle = QVBoxLayout(central)
+        middle.setContentsMargins(12, 10, 12, 10)
+        middle.setSpacing(8)
         preview_header = QHBoxLayout()
         self.project_label = _label("新建或选择项目", "section")
         self.project_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         preview_header.addWidget(self.project_label, 1)
-        preview_header.addWidget(_label("俯视示意  ·  北 ↑", "muted"))
+        preview_header.addWidget(_label("二维任务视图  ·  北 ↑", "muted"))
         middle.addLayout(preview_header)
+
+        views = QSplitter(Qt.Orientation.Horizontal)
+        views.setChildrenCollapsible(False)
+        scene_panel = QWidget()
+        scene_layout = QVBoxLayout(scene_panel)
+        scene_layout.setContentsMargins(0, 0, 0, 0)
+        scene_layout.setSpacing(6)
         self.viewport = SceneViewport()
-        middle.addWidget(self.viewport, 1)
-        middle.addWidget(_label("青色 · 目标路线和位置    灰色 · 建筑    橙色 · 当前障碍物", "muted"))
+        scene_layout.addWidget(self.viewport, 1)
+        legend = _label("目标路线 / 当前目标    建筑    生效障碍物", "muted")
+        scene_layout.addWidget(legend)
         timeline = QHBoxLayout()
+        self.play_preview = QPushButton("播放")
+        self.play_preview.clicked.connect(self._toggle_preview)
+        timeline.addWidget(self.play_preview)
+        step_preview = QPushButton("步进")
+        step_preview.clicked.connect(lambda: self.time_slider.setValue(self.time_slider.value() + 1))
+        timeline.addWidget(step_preview)
+        reset_preview = QPushButton("复位")
+        reset_preview.clicked.connect(lambda: self.time_slider.setValue(0))
+        timeline.addWidget(reset_preview)
+        self._preview_controls = (self.play_preview, step_preview, reset_preview)
+        self.preview_timer = QTimer(self)
+        self.preview_timer.setInterval(100)
+        self.preview_timer.timeout.connect(self._advance_preview)
         timeline.addWidget(_label("预览时间", "muted"))
         self.time_slider = QSlider(Qt.Orientation.Horizontal)
         self.time_slider.setAccessibleName("预览时间")
@@ -187,22 +186,38 @@ class MainWindow(QMainWindow):
         self.time_label = _label("0.0 s", "muted")
         self.time_label.setMinimumWidth(65)
         timeline.addWidget(self.time_label)
-        middle.addLayout(timeline)
-        self.runs = RunPanel(workspace)
-        self.runs.requested.connect(self._start_simulation)
-        middle.addWidget(self.runs)
-        panes.addWidget(preview)
+        scene_layout.addLayout(timeline)
+        views.addWidget(scene_panel)
+        self.camera = CameraView()
+        views.addWidget(self.camera)
+        views.setStretchFactor(0, 3)
+        views.setStretchFactor(1, 2)
+        views.setSizes([600, 400])
+        middle.addWidget(views, 1)
+        self.setCentralWidget(central)
 
-        details = QWidget()
-        right = QVBoxLayout(details)
-        right.addWidget(_label("场景属性", "section"))
         self.editor = SceneEditor()
         self.editor.changed.connect(self._scene_changed)
-        right.addWidget(self.editor, 1)
-        panes.addWidget(details)
-        panes.setStretchFactor(1, 1)
-        panes.setSizes([220, 700, 325])
+        self.editor_dock = QDockWidget("场景属性", self)
+        self.editor_dock.setObjectName("editorDock")
+        self.editor_dock.setWidget(self.editor)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.editor_dock)
 
+        self.runs = RunPanel(workspace)
+        self.runs.requested.connect(self._start_simulation)
+        self.runs.camera_frame.connect(self.camera.show_frame)
+        self.runs.run_started.connect(self._run_started)
+        self.runs.run_finished.connect(self._run_finished)
+        self.runs.backend.currentTextChanged.connect(self._backend_changed)
+        self.run_dock = QDockWidget("任务与日志", self)
+        self.run_dock.setObjectName("runDock")
+        self.run_dock.setWidget(self.runs)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.run_dock)
+        self.resizeDocks([self.project_dock, self.editor_dock], [220, 310], Qt.Orientation.Horizontal)
+        self.resizeDocks([self.run_dock], [230], Qt.Orientation.Vertical)
+
+        self.backend_status = _label("离线估计", "muted")
+        self.statusBar().addPermanentWidget(self.backend_status)
         self.statusBar().addPermanentWidget(_label("本地工作区", "muted"))
         self.save_shortcut = QShortcut(QKeySequence.StandardKey.Save, self)
         self.save_shortcut.activated.connect(self.save)
@@ -235,9 +250,14 @@ class MainWindow(QMainWindow):
     def _set_project(self, project: Project | None) -> None:
         self.project = project
         self._pending_changes = False
-        self.editor.setEnabled(project is not None)
+        self.preview_timer.stop()
+        self.play_preview.setText("播放")
+        for control in self._preview_controls:
+            control.setEnabled(project is not None)
+        editable = project is not None and project.project_id != self._running_project_id
+        self.editor.setEnabled(editable)
         self.rename_button.setEnabled(project is not None)
-        self.save_button.setEnabled(project is not None)
+        self.save_button.setEnabled(editable)
         self.time_slider.setEnabled(project is not None)
         self.time_slider.blockSignals(True)
         self.time_slider.setValue(0)
@@ -246,9 +266,28 @@ class MainWindow(QMainWindow):
         self.project_label.setToolTip(project.name if project else "")
         if project is not None:
             self.editor.load_scene(project.scene)
+        self.camera.clear()
         self._refresh_preview()
         self.runs.set_project(project.project_id if project else None)
         self.statusBar().showMessage("场景已加载" if project else "请选择或新建一个项目")
+
+    def _toggle_preview(self) -> None:
+        if self.project is None:
+            return
+        if self.preview_timer.isActive():
+            self.preview_timer.stop()
+            self.play_preview.setText("播放")
+            return
+        if self.time_slider.value() == self.time_slider.maximum():
+            self.time_slider.setValue(0)
+        self.play_preview.setText("暂停")
+        self.preview_timer.start()
+
+    def _advance_preview(self) -> None:
+        self.time_slider.setValue(self.time_slider.value() + 1)
+        if self.time_slider.value() == self.time_slider.maximum():
+            self.preview_timer.stop()
+            self.play_preview.setText("播放")
 
     def _refresh_preview(self) -> None:
         if self.project is None:
@@ -264,10 +303,12 @@ class MainWindow(QMainWindow):
         self.time_slider.setMaximum(round(config.duration_s * 10))
         self.time_slider.blockSignals(False)
         elapsed = min(self.time_slider.value() / 10, config.duration_s)
-        self.time_label.setText(f"{elapsed:.1f} s")
+        self.time_label.setText(f"{elapsed:.1f} s / {config.duration_s:g} s")
         self.viewport.show_scene(config, elapsed)
 
     def _scene_changed(self) -> None:
+        if self.project is None:
+            return
         self._pending_changes = True
         self.project_label.setText(f"{self.project.name}  *")
         self.statusBar().showMessage("有未保存的场景修改")
@@ -292,6 +333,26 @@ class MainWindow(QMainWindow):
     def _start_simulation(self) -> None:
         if self.project is not None and (not self._pending_changes or self.save()):
             self.runs.start()
+
+    def _run_started(self, _run_id: str) -> None:
+        self._running_project_id = self.project.project_id if self.project is not None else None
+        self.editor.setEnabled(False)
+        self.save_button.setEnabled(False)
+        if self.runs.backend.currentText() == "AirSim":
+            self.camera.clear("AirSim 任务已启动，正在等待真实相机帧…")
+        self.statusBar().showMessage("任务运行中；运行项目的场景配置已锁定")
+
+    def _run_finished(self, _run_id: str, status: str) -> None:
+        self._running_project_id = None
+        editable = self.project is not None
+        self.editor.setEnabled(editable)
+        self.save_button.setEnabled(editable)
+        self.statusBar().showMessage(f"任务状态：{status}")
+
+    def _backend_changed(self, backend: str) -> None:
+        self.backend_status.setText(backend)
+        if backend != "AirSim" and not self.runs.busy:
+            self.camera.clear()
 
     def _allow_leave(self) -> bool:
         if not self._pending_changes:
@@ -351,7 +412,7 @@ class MainWindow(QMainWindow):
 
     def _sign_out(self) -> None:
         if self.runs.busy:
-            self.statusBar().showMessage("请等待仿真任务结束，或先取消运行")
+            self.statusBar().showMessage("请等待仿真或连接检查结束，或先停止运行")
             return
         if not self._allow_leave():
             return
@@ -368,7 +429,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         if self.runs.busy:
-            self.statusBar().showMessage("请等待仿真任务结束，或先取消运行")
+            self.statusBar().showMessage("请等待仿真或连接检查结束，或先停止运行")
             event.ignore()
         elif self._allow_leave():
             event.accept()
@@ -383,9 +444,7 @@ def main() -> int:
     application = QApplication([])
     application.setApplicationName(TITLE)
     application.setOrganizationName("UAV Guard")
-    application.setFont(QFont("Microsoft YaHei UI", 10))
-    application.setStyle("Fusion")
-    application.setStyleSheet(_STYLE)
+    apply_theme(application)
     app_data = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)
     path = args.workspace if args.workspace is not None else Path(app_data) / "workspace.sqlite3"
     try:

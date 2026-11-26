@@ -238,6 +238,28 @@ class Workspace:
             if update.rowcount != 1:
                 raise ValueError("没有可结束的运行记录")
 
+    def run_log_path(self, run_id: str) -> Path:
+        """Return a bounded per-run log path beside the workspace database."""
+        if len(run_id) != 32 or any(character not in "0123456789abcdef" for character in run_id):
+            raise ValueError("运行编号无效")
+        return self._database_path.parent / "runs" / run_id / "run.log"
+
+    def append_run_log(self, run_id: str, message: str) -> None:
+        """Append one UTF-8 operational log entry without changing run results."""
+        self._require_sign_in()
+        path = self.run_log_path(run_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().astimezone().isoformat(timespec="milliseconds")
+        with path.open("a", encoding="utf-8") as output:
+            output.write(f"[{timestamp}] {message.rstrip()}\n")
+
+    def read_run_log(self, run_id: str) -> str:
+        """Read a task log after confirming that the caller can open the run."""
+        self._require_sign_in()
+        self.open_run(run_id)
+        path = self.run_log_path(run_id)
+        return path.read_text(encoding="utf-8") if path.exists() else ""
+
     def list_runs(self, project_id: str) -> list[RunInfo]:
         self._require_sign_in()
         with self._connection() as database:

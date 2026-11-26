@@ -1,23 +1,45 @@
-"""Interactive charts and playback for completed runs."""
+"""Interactive result charts, aligned run summaries, and raw-sample playback."""
 
 from base64 import b64decode
-from bisect import bisect_right
+from bisect import bisect_left
 from datetime import datetime
 from pathlib import Path
 import sqlite3
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QFont, QPixmap
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel, QMessageBox,
-    QPushButton, QSlider, QTabWidget, QVBoxLayout, QWidget,
+    QAbstractItemView, QComboBox, QDialog, QFileDialog, QHBoxLayout, QHeaderView,
+    QLabel, QMessageBox, QPushButton, QSlider, QTableWidget, QTableWidgetItem,
+    QTabWidget, QVBoxLayout, QWidget,
 )
+import pyqtgraph as pg
 
 from .results import TRAJECTORY, Series, chart_data, export_csv, metrics
+from .theme import BORDER, INSET, MUTED, TEXT
 from .workspace import RunRecord, Workspace
 
 
+pg.setConfigOptions(antialias=True)
+
+
+def _nearest_index(times: tuple[float, ...], elapsed: float) -> int:
+    position = bisect_left(times, elapsed)
+    if position <= 0:
+        return 0
+    if position >= len(times):
+        return len(times) - 1
+    return position if abs(times[position] - elapsed) < abs(times[position - 1] - elapsed) else position - 1
+
+
+def _read_only(item: QTableWidgetItem) -> QTableWidgetItem:
+    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+    return item
+
+
 class ResultChart(QWidget):
+    time_hovered = Signal(float)
+
     def __init__(self) -> None:
         super().__init__()
         self.setMinimumSize(480, 280)
@@ -25,81 +47,90 @@ class ResultChart(QWidget):
         self.elapsed = 0.0
         self.trajectory = True
         self.x_label = self.y_label = ""
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        self.readout = QLabel("移动指针或拖动时间轴读取样本值")
+        self.readout.setObjectName("muted")
+        self.readout.setFont(QFont("Cascadia Mono", 9))
+        layout.addWidget(self.readout)
+        self.plot = pg.PlotWidget(background=INSET)
+        self.plot.showGrid(x=True, y=True, alpha=0.12)
+        for axis in ("left", "bottom"):
+            self.plot.getAxis(axis).setPen(BORDER)
+            self.plot.getAxis(axis).setTextPen(MUTED)
+        self.legend = self.plot.addLegend(offset=(12, 8), labelTextColor=TEXT)
+        self.cursor = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen(TEXT, width=1, style=Qt.PenStyle.DashLine))
+        self.cursor.hide()
+        self.plot.addItem(self.cursor)
+        layout.addWidget(self.plot, 1)
+        self._mouse_proxy = pg.SignalProxy(self.plot.scene().sigMouseMoved, rateLimit=30, slot=self._hover)
 
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.fillRect(self.rect(), QColor("#0c171d"))
-        if not self.series:
-            return
-        bounds = QRectF(64, 38, self.width() - 91, self.height() - 90)
-        xs = [x for series in self.series for x, _ in series.points]
-        ys = [y for series in self.series for _, y in series.points]
-        x_min, x_max = min(xs), max(xs)
-        y_min, y_max = min(ys), max(ys)
-        x_pad = (x_max - x_min) * .04 or 1
-        y_pad = (y_max - y_min) * .04 or 1
-        x_min, x_max = x_min - x_pad, x_max + x_pad
-        y_min, y_max = y_min - y_pad, y_max + y_pad
-        if self.trajectory:
-            units_per_pixel = max((x_max - x_min) / bounds.width(), (y_max - y_min) / bounds.height())
-            x_extra = (bounds.width() * units_per_pixel - (x_max - x_min)) / 2
-            y_extra = (bounds.height() * units_per_pixel - (y_max - y_min)) / 2
-            x_min, x_max = x_min - x_extra, x_max + x_extra
-            y_min, y_max = y_min - y_extra, y_max + y_extra
-        else:
-            x_min, x_max = 0.0, max(xs)
-            y_min = max(0.0, y_min)
+    def refresh(self) -> None:
+        self._redraw()
+        super().update()
 
-        def point(x: float, y: float) -> QPointF:
-            return QPointF(bounds.left() + (x - x_min) * bounds.width() / (x_max - x_min),
-                           bounds.bottom() - (y - y_min) * bounds.height() / (y_max - y_min))
-
-        painter.setPen(QColor("#9db4bb"))
-        painter.drawText(QPointF(15, 23), self.y_label)
-        painter.drawText(QPointF(bounds.right() - 72, self.height() - 12), self.x_label)
-        for index in range(6):
-            ratio = index / 5
-            x = bounds.left() + ratio * bounds.width()
-            y = bounds.bottom() - ratio * bounds.height()
-            painter.setPen(QColor("#263b45"))
-            painter.drawLine(QPointF(x, bounds.top()), QPointF(x, bounds.bottom()))
-            painter.drawLine(QPointF(bounds.left(), y), QPointF(bounds.right(), y))
-            painter.setPen(QColor("#9db4bb"))
-            painter.drawText(QPointF(x - 12, bounds.bottom() + 19), f"{x_min + ratio * (x_max - x_min):.3g}")
-            painter.drawText(QPointF(9, y + 4), f"{y_min + ratio * (y_max - y_min):.3g}")
-
-        if not self.trajectory:
-            cursor = point(self.elapsed, y_min).x()
-            painter.setPen(QPen(QColor("#849da7"), 1, Qt.PenStyle.DashLine))
-            painter.drawLine(QPointF(cursor, bounds.top()), QPointF(cursor, bounds.bottom()))
-
-        legend_x = bounds.left() + 120
+    def _redraw(self) -> None:
+        self.plot.clear()
+        self.legend.clear()
+        self.cursor = pg.InfiniteLine(angle=90, movable=False,
+                                      pen=pg.mkPen(TEXT, width=1, style=Qt.PenStyle.DashLine))
+        self.plot.addItem(self.cursor)
+        self.plot.setLabel("left", self.y_label, color=MUTED)
+        self.plot.setLabel("bottom", self.x_label, color=MUTED)
+        self.plot.setAspectLocked(self.trajectory, ratio=1.0)
+        self.cursor.setVisible(not self.trajectory)
         for series in self.series:
-            color = QColor(series.color)
-            path = QPainterPath(point(*series.points[0]))
-            for x, y in series.points[1:]:
-                path.lineTo(point(x, y))
-            painter.setPen(QPen(color, 2))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawPath(path)
-            sample = bisect_right(series.times, self.elapsed) - 1
-            if 0 <= sample and self.elapsed <= series.times[-1]:
-                painter.setBrush(color)
-                painter.drawEllipse(point(*series.points[sample]), 4, 4)
-            painter.drawText(QPointF(legend_x, 23), series.name)
-            legend_x += painter.fontMetrics().horizontalAdvance(series.name) + 16
+            xs, ys = zip(*series.points)
+            pen = pg.mkPen(series.color, width=2,
+                           style=Qt.PenStyle.DashLine if series.dashed else Qt.PenStyle.SolidLine)
+            self.plot.plot(xs, ys, pen=pen, name=series.name, connect="finite")
+        if self.series and not self.trajectory:
+            self.plot.setXRange(0, max(series.times[-1] for series in self.series), padding=0.02)
+        else:
+            self.plot.autoRange()
+        self._refresh_cursor()
+
+    def _refresh_cursor(self) -> None:
+        if not self.trajectory:
+            self.cursor.setPos(self.elapsed)
+        if not self.series:
+            self.readout.clear()
+            return
+        values = []
+        for series in self.series:
+            index = _nearest_index(series.times, self.elapsed)
+            x, y = series.points[index]
+            if self.trajectory:
+                values.append(f"{series.name}  东 {x:.3f} m  北 {y:.3f} m")
+            else:
+                values.append(f"{series.name}  {y:.4g}")
+        self.readout.setText(f"t = {self.elapsed:.1f} s    " + "    |    ".join(values))
+
+    def _hover(self, event) -> None:
+        if self.trajectory or not self.series:
+            return
+        position = event[0]
+        if not self.plot.sceneBoundingRect().contains(position):
+            return
+        x = self.plot.plotItem.vb.mapSceneToView(position).x()
+        times = self.series[0].times
+        self.time_hovered.emit(times[_nearest_index(times, x)])
 
 
 class ResultDialog(QDialog):
-    def __init__(self, workspace: Workspace, run: RunRecord, lines: list[str], parent: QWidget) -> None:
+    def __init__(self, workspace: Workspace, run: RunRecord, lines: list[str],
+                 parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.workspace = workspace
         self.runs = [run]
-        self.setWindowTitle("仿真结果")
-        self.resize(900, 650)
+        self.setWindowTitle("结果分析")
+        self.resize(1100, 760)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
         controls = QHBoxLayout()
+        controls.setSpacing(6)
         self.selection = QComboBox()
         self.selection.addItem("单次运行", None)
         for item in workspace.list_runs(run.info.project_id):
@@ -109,31 +140,59 @@ class ResultDialog(QDialog):
         controls.addWidget(self.selection, 1)
         self.metric_picker = QComboBox()
         self.metric_picker.addItems([TRAJECTORY, *metrics(run.info.backend)])
+        self.metric_picker.setMinimumWidth(190)
         controls.addWidget(self.metric_picker)
         export = QPushButton("导出 CSV")
         export.clicked.connect(self._export)
         controls.addWidget(export)
         layout.addLayout(controls)
 
+        self.summary_table = QTableWidget(0, 5)
+        self.summary_table.setHorizontalHeaderLabels(["运行", "运行编号", "随机种子", "样本数", "关键指标"])
+        self.summary_table.verticalHeader().hide()
+        self.summary_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.summary_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.summary_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.summary_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        self.summary_table.setMaximumHeight(104)
+        layout.addWidget(self.summary_table)
+
         tabs = QTabWidget()
         chart_page = QWidget()
         chart_layout = QVBoxLayout(chart_page)
-        self.comparison = QLabel()
-        chart_layout.addWidget(self.comparison)
         self.chart = ResultChart()
         chart_layout.addWidget(self.chart, 1)
         timeline = QHBoxLayout()
         self.play = QPushButton("播放")
         self.play.clicked.connect(self._toggle_playback)
         timeline.addWidget(self.play)
+        step = QPushButton("步进")
+        step.clicked.connect(lambda: self.slider.setValue(self.slider.value() + 1))
+        timeline.addWidget(step)
+        reset = QPushButton("复位")
+        reset.clicked.connect(lambda: self.slider.setValue(0))
+        timeline.addWidget(reset)
+        self.speed = QComboBox()
+        for label, value in (("0.5×", 400), ("1×", 200), ("2×", 100)):
+            self.speed.addItem(label, value)
+        self.speed.setCurrentIndex(1)
+        self.speed.currentIndexChanged.connect(self._speed_changed)
+        timeline.addWidget(self.speed)
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setAccessibleName("回放时间")
         self.slider.valueChanged.connect(self._scrub)
         timeline.addWidget(self.slider, 1)
         self.time_label = QLabel()
+        self.time_label.setFont(QFont("Cascadia Mono", 9))
         timeline.addWidget(self.time_label)
         chart_layout.addLayout(timeline)
         tabs.addTab(chart_page, "图表与回放")
+
+        self.sample_table = QTableWidget(0, 0)
+        self.sample_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.sample_table.setAlternatingRowColors(True)
+        self.sample_table.verticalHeader().hide()
+        tabs.addTab(self.sample_table, "原始样本")
 
         details = QWidget()
         detail_layout = QVBoxLayout(details)
@@ -142,7 +201,7 @@ class ResultDialog(QDialog):
         detail_layout.addWidget(text)
         if frame := run.result.get("last_frame_png"):
             pixmap = QPixmap()
-            if pixmap.loadFromData(b64decode(frame), "PNG"):
+            if pixmap.loadFromData(b64decode(frame)):
                 image = QLabel()
                 image.setPixmap(pixmap.scaled(640, 380, Qt.AspectRatioMode.KeepAspectRatio,
                                               Qt.TransformationMode.SmoothTransformation))
@@ -157,6 +216,7 @@ class ResultDialog(QDialog):
         self.finished.connect(self.timer.stop)
         self.selection.currentIndexChanged.connect(self._compare)
         self.metric_picker.currentTextChanged.connect(self._refresh_chart)
+        self.chart.time_hovered.connect(lambda value: self.slider.setValue(round(value * 5)))
         self._refresh_chart()
 
     def _compare(self) -> None:
@@ -176,19 +236,40 @@ class ResultDialog(QDialog):
         self.chart.series, self.chart.x_label, self.chart.y_label = chart_data(self.runs, metric)
         self.chart.trajectory = metric == TRAJECTORY
         self.slider.setMaximum(round(max(series.times[-1] for series in self.chart.series) * 5))
-        labels = []
-        for name, run in zip(("本次", "对照"), self.runs):
+        self.summary_table.setRowCount(len(self.runs))
+        for row, run in enumerate(self.runs):
             summary = run.result["summary"]
             value = (f"RMSE {summary['rmse_m']:.3f} m" if "rmse_m" in summary
                      else f"可见比例 {summary['visibility_fraction']:.1%}")
-            labels.append(f"{name} · 种子 {run.scene.seed} · {summary['samples']} 个样本 · {value}")
-        self.comparison.setText("    |    ".join(labels))
+            cells = ["本次" if row == 0 else "对照", run.info.run_id[:8], str(run.scene.seed),
+                     str(summary["samples"]), value]
+            for column, text in enumerate(cells):
+                item = _read_only(QTableWidgetItem(text))
+                if column == 1:
+                    item.setToolTip(run.info.run_id)
+                self.summary_table.setItem(row, column, item)
+        self._refresh_samples()
         self._scrub()
+
+    def _refresh_samples(self) -> None:
+        fields = list(dict.fromkeys(key for run in self.runs for row in run.result["samples"] for key in row))
+        rows = [(run, sample) for run in self.runs for sample in run.result["samples"]]
+        self.sample_table.setColumnCount(len(fields) + 1)
+        self.sample_table.setHorizontalHeaderLabels(["运行编号", *fields])
+        self.sample_table.setRowCount(len(rows))
+        for row_index, (run, sample) in enumerate(rows):
+            values = [run.info.run_id[:8], *("—" if sample.get(field) is None else sample.get(field) for field in fields)]
+            for column, value in enumerate(values):
+                text = str(int(value)) if isinstance(value, bool) else str(value)
+                item = _read_only(QTableWidgetItem(text))
+                if column == 0:
+                    item.setToolTip(run.info.run_id)
+                self.sample_table.setItem(row_index, column, item)
 
     def _scrub(self) -> None:
         self.chart.elapsed = self.slider.value() / 5
-        self.time_label.setText(f"{self.chart.elapsed:.1f} s")
-        self.chart.update()
+        self.time_label.setText(f"{self.chart.elapsed:.1f} s / {self.slider.maximum() / 5:.1f} s")
+        self.chart.refresh()
 
     def _toggle_playback(self) -> None:
         if self.timer.isActive():
@@ -199,6 +280,9 @@ class ResultDialog(QDialog):
             self.slider.setValue(0)
         self.play.setText("暂停")
         self.timer.start()
+
+    def _speed_changed(self) -> None:
+        self.timer.setInterval(self.speed.currentData())
 
     def _advance(self) -> None:
         self.slider.setValue(self.slider.value() + 1)
@@ -211,4 +295,4 @@ class ResultDialog(QDialog):
             try:
                 export_csv(Path(path), self.runs)
             except OSError as error:
-                QMessageBox.warning(self, "无法导出 CSV", str(error))
+                QMessageBox.critical(self, "无法导出 CSV", str(error))
