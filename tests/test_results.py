@@ -6,7 +6,9 @@ import unittest
 
 from guard_workbench.airsim_backend import AIRSIM_BACKEND
 from guard_workbench.offline import OFFLINE_BACKEND, run_offline
-from guard_workbench.results import TRAJECTORY, chart_data, export_csv
+from guard_workbench.results import (
+    TRAJECTORY, chart_data, export_csv, metrics, prediction_overlay,
+)
 from guard_workbench.scene import SceneConfig
 from guard_workbench.workspace import RunInfo, RunRecord
 
@@ -29,6 +31,23 @@ class ResultTests(unittest.TestCase):
         error, _, _ = chart_data(runs, "位置误差")
         self.assertEqual(error[0].points[-1][0], 1.0)
         self.assertEqual(error[1].points[-1][0], 2.0)
+        ages, _, _ = chart_data(runs, "观测年龄")
+        self.assertEqual([len(series.points) for series in ages], [6, 11])
+        overlay = prediction_overlay(runs[0], .4, 2.0)
+        self.assertIsNotNone(overlay)
+        assert overlay is not None
+        self.assertEqual(overlay.horizon_s, 2.0)
+        self.assertEqual(len(overlay.contour), 81)
+        self.assertEqual(len(overlay.representatives), 5)
+        stored_result = runs[0].result
+        assert stored_result is not None
+        row = stored_result["samples"][2]
+        self.assertEqual(overlay.center, (row["prediction_2s_east_m"], row["prediction_2s_north_m"]))
+        self.assertEqual(overlay.observation_age_s, row["observation_age_s"])
+        old_airsim = _run("old", AIRSIM_BACKEND, first,
+                          {"samples": [{"time_s": 0, "visible": True}]})
+        self.assertNotIn("位置误差", metrics(AIRSIM_BACKEND, old_airsim.result))
+        self.assertIsNone(prediction_overlay(old_airsim, 0, 1.0))
 
     def test_airsim_export_preserves_identifiers_missing_values_and_visibility(self):
         rows = [{"time_s": 0, "visible": False, "received_capture_s": None},

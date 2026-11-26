@@ -15,8 +15,10 @@ from PySide6.QtWidgets import (
 )
 import pyqtgraph as pg
 
-from .results import TRAJECTORY, Series, chart_data, export_csv, metrics
-from .theme import BORDER, INSET, MUTED, TEXT
+from .results import (
+    TRAJECTORY, PredictionOverlay, Series, chart_data, export_csv, metrics, prediction_overlay,
+)
+from .theme import BORDER, INSET, MUTED, SERIES_PRIMARY, TEXT
 from .workspace import RunRecord, Workspace
 
 
@@ -46,12 +48,14 @@ class ResultChart(QWidget):
         self.series: list[Series] = []
         self.elapsed = 0.0
         self.trajectory = True
+        self.prediction: PredictionOverlay | None = None
         self.x_label = self.y_label = ""
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
         self.readout = QLabel("移动指针或拖动时间轴读取样本值")
         self.readout.setObjectName("muted")
+        self.readout.setWordWrap(True)
         self.readout.setFont(QFont("Cascadia Mono", 9))
         layout.addWidget(self.readout)
         self.plot = pg.PlotWidget(background=INSET)
@@ -60,9 +64,9 @@ class ResultChart(QWidget):
             self.plot.getAxis(axis).setPen(BORDER)
             self.plot.getAxis(axis).setTextPen(MUTED)
         self.legend = self.plot.addLegend(offset=(12, 8), labelTextColor=TEXT)
-        self.cursor = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen(TEXT, width=1, style=Qt.PenStyle.DashLine))
-        self.cursor.hide()
-        self.plot.addItem(self.cursor)
+        self.time_cursor = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen(TEXT, width=1, style=Qt.PenStyle.DashLine))
+        self.time_cursor.hide()
+        self.plot.addItem(self.time_cursor)
         layout.addWidget(self.plot, 1)
         self._mouse_proxy = pg.SignalProxy(self.plot.scene().sigMouseMoved, rateLimit=30, slot=self._hover)
 
@@ -73,18 +77,27 @@ class ResultChart(QWidget):
     def _redraw(self) -> None:
         self.plot.clear()
         self.legend.clear()
-        self.cursor = pg.InfiniteLine(angle=90, movable=False,
+        self.time_cursor = pg.InfiniteLine(angle=90, movable=False,
                                       pen=pg.mkPen(TEXT, width=1, style=Qt.PenStyle.DashLine))
-        self.plot.addItem(self.cursor)
+        self.plot.addItem(self.time_cursor)
         self.plot.setLabel("left", self.y_label, color=MUTED)
         self.plot.setLabel("bottom", self.x_label, color=MUTED)
         self.plot.setAspectLocked(self.trajectory, ratio=1.0)
-        self.cursor.setVisible(not self.trajectory)
+        self.time_cursor.setVisible(not self.trajectory)
         for series in self.series:
             xs, ys = zip(*series.points)
             pen = pg.mkPen(series.color, width=2,
                            style=Qt.PenStyle.DashLine if series.dashed else Qt.PenStyle.SolidLine)
             self.plot.plot(xs, ys, pen=pen, name=series.name, connect="finite")
+        if self.trajectory and self.prediction is not None:
+            prediction = self.prediction
+            xs, ys = zip(*prediction.contour)
+            self.plot.plot(xs, ys, pen=pg.mkPen(SERIES_PRIMARY, width=1, style=Qt.PenStyle.DotLine),
+                           name=f"本次 {prediction.horizon_s:g} s 95% 预测")
+            xs, ys = zip(*prediction.representatives)
+            self.plot.plot(xs, ys, pen=None, symbol="x", symbolSize=9,
+                           symbolPen=pg.mkPen(TEXT, width=1.5),
+                           name=f"本次 {prediction.horizon_s:g} s 五点道路投影")
         if self.series and not self.trajectory:
             self.plot.setXRange(0, max(series.times[-1] for series in self.series), padding=0.02)
         else:
@@ -93,7 +106,7 @@ class ResultChart(QWidget):
 
     def _refresh_cursor(self) -> None:
         if not self.trajectory:
-            self.cursor.setPos(self.elapsed)
+            self.time_cursor.setPos(self.elapsed)
         if not self.series:
             self.readout.clear()
             return
@@ -105,6 +118,12 @@ class ResultChart(QWidget):
                 values.append(f"{series.name}  东 {x:.3f} m  北 {y:.3f} m")
             else:
                 values.append(f"{series.name}  {y:.4g}")
+        if self.trajectory and self.prediction is not None:
+            prediction = self.prediction
+            values.append(f"{prediction.horizon_s:g} s 预测  东 {prediction.center[0]:.3f} m  "
+                          f"北 {prediction.center[1]:.3f} m")
+            if prediction.observation_age_s is not None:
+                values.append(f"观测年龄 {prediction.observation_age_s:.1f} s")
         self.readout.setText(f"t = {self.elapsed:.1f} s    " + "    |    ".join(values))
 
     def _hover(self, event) -> None:
@@ -139,9 +158,16 @@ class ResultDialog(QDialog):
                 self.selection.addItem(f"对照 {stamp} · {item.run_id[:8]}", item.run_id)
         controls.addWidget(self.selection, 1)
         self.metric_picker = QComboBox()
-        self.metric_picker.addItems([TRAJECTORY, *metrics(run.info.backend)])
+        self.metric_picker.addItems([TRAJECTORY, *metrics(run.info.backend, run.result)])
         self.metric_picker.setMinimumWidth(190)
         controls.addWidget(self.metric_picker)
+        controls.addWidget(QLabel("预测时距"))
+        self.horizon = QComboBox()
+        for horizon in (1.0, 2.0, 4.0):
+            self.horizon.addItem(f"{horizon:g} s", horizon)
+        self.horizon.setAccessibleName("预测时距")
+        self.horizon.currentIndexChanged.connect(self._scrub)
+        controls.addWidget(self.horizon)
         export = QPushButton("导出 CSV")
         export.clicked.connect(self._export)
         controls.addWidget(export)
@@ -199,7 +225,7 @@ class ResultDialog(QDialog):
         text = QLabel("\n".join(lines))
         text.setTextFormat(Qt.TextFormat.PlainText)
         detail_layout.addWidget(text)
-        if frame := run.result.get("last_frame_png"):
+        if run.result is not None and (frame := run.result.get("last_frame_png")):
             pixmap = QPixmap()
             if pixmap.loadFromData(b64decode(frame)):
                 image = QLabel()
@@ -224,7 +250,10 @@ class ResultDialog(QDialog):
         self.runs = self.runs[:1]
         if run_id is not None:
             try:
-                self.runs.append(self.workspace.open_run(run_id))
+                comparison = self.workspace.open_run(run_id)
+                if comparison.result is None:
+                    raise ValueError("对照运行没有可分析的结果")
+                self.runs.append(comparison)
             except (KeyError, ValueError, sqlite3.Error) as error:
                 QMessageBox.warning(self, "无法打开对照运行", str(error))
                 self.selection.setCurrentIndex(0)
@@ -235,14 +264,21 @@ class ResultDialog(QDialog):
         metric = self.metric_picker.currentText()
         self.chart.series, self.chart.x_label, self.chart.y_label = chart_data(self.runs, metric)
         self.chart.trajectory = metric == TRAJECTORY
+        self.chart.prediction = None
+        self.horizon.setEnabled(self.chart.trajectory)
         self.slider.setMaximum(round(max(series.times[-1] for series in self.chart.series) * 5))
         self.summary_table.setRowCount(len(self.runs))
         for row, run in enumerate(self.runs):
+            if run.result is None:
+                continue
             summary = run.result["summary"]
-            value = (f"RMSE {summary['rmse_m']:.3f} m" if "rmse_m" in summary
-                     else f"可见比例 {summary['visibility_fraction']:.1%}")
+            values = []
+            if "visibility_fraction" in summary:
+                values.append(f"可见 {summary['visibility_fraction']:.1%}")
+            if "rmse_m" in summary:
+                values.append(f"RMSE {summary['rmse_m']:.3f} m")
             cells = ["本次" if row == 0 else "对照", run.info.run_id[:8], str(run.scene.seed),
-                     str(summary["samples"]), value]
+                     str(summary["samples"]), " · ".join(values)]
             for column, text in enumerate(cells):
                 item = _read_only(QTableWidgetItem(text))
                 if column == 1:
@@ -252,8 +288,15 @@ class ResultDialog(QDialog):
         self._scrub()
 
     def _refresh_samples(self) -> None:
-        fields = list(dict.fromkeys(key for run in self.runs for row in run.result["samples"] for key in row))
-        rows = [(run, sample) for run in self.runs for sample in run.result["samples"]]
+        fields: dict[str, None] = {}
+        rows = []
+        for run in self.runs:
+            if run.result is None:
+                continue
+            for sample in run.result["samples"]:
+                rows.append((run, sample))
+                for field in sample:
+                    fields[field] = None
         self.sample_table.setColumnCount(len(fields) + 1)
         self.sample_table.setHorizontalHeaderLabels(["运行编号", *fields])
         self.sample_table.setRowCount(len(rows))
@@ -268,6 +311,9 @@ class ResultDialog(QDialog):
 
     def _scrub(self) -> None:
         self.chart.elapsed = self.slider.value() / 5
+        self.chart.prediction = (prediction_overlay(self.runs[0], self.chart.elapsed,
+                                                    self.horizon.currentData())
+                                 if self.chart.trajectory else None)
         self.time_label.setText(f"{self.chart.elapsed:.1f} s / {self.slider.maximum() / 5:.1f} s")
         self.chart.refresh()
 

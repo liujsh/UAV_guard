@@ -362,9 +362,13 @@ class RunPanel(QWidget):
             if airsim:
                 lines.extend((f"相机可见比例：{summary['visibility_fraction']:.1%}",
                               f"平均相机距离：{summary['mean_camera_distance_m']:.2f} m"))
-            else:
+            if "rmse_m" in summary:
                 lines.extend((f"位置 RMSE：{summary['rmse_m']:.3f} m",
                               f"95% 预测椭圆覆盖率：{summary['coverage_95']:.1%}"))
+            if "estimator_version" in summary:
+                lines.extend((f"估计器：{summary['estimator_version']}",
+                              f"平均位置 NLL：{summary['mean_nll']:.4f}    "
+                              f"OOSM 回放更新：{summary['oosm_updates']} 次"))
         if run.result is not None:
             try:
                 dialog = ResultDialog(self.workspace, run, lines, self)
