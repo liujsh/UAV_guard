@@ -16,6 +16,9 @@ from .airsim_rpc import AirSimRPC
 from .offline import SimulationCancelled
 from .route import target_position
 from .scene import SceneConfig
+from .uncertainty import (
+    ESTIMATOR_VERSION, RATE_HZ, DelayedCV, ellipse_area, estimate_record, quality,
+)
 
 
 AIRSIM_BACKEND = "airsim-blocks-v1"
@@ -24,7 +27,6 @@ _CAMERA = "Workbench"
 _TARGET_ID = 42
 _TARGET_COLOR = (92, 31, 106)
 _SIZE_LIMIT = 1_000_000
-_RATE_HZ = 5
 
 
 def _vector(x: float, y: float, z: float) -> dict:
@@ -175,16 +177,20 @@ def run_airsim(scene: SceneConfig, endpoint: AirSimEndpoint, *,
                on_camera_frame: Callable[[bytes, int], None] | None = None) -> dict:
     if cancelled():
         raise SimulationCancelled()
-    n = math.floor(scene.duration_s * _RATE_HZ) + 1
-    delay_ticks = math.ceil(scene.observation_delay_s * _RATE_HZ)
+    n = math.floor(scene.duration_s * RATE_HZ) + 1
+    delay_ticks = math.ceil(scene.observation_delay_s * RATE_HZ)
     blackout_start = (scene.duration_s - scene.observation_blackout_s) / 2
     blackout_end = blackout_start + scene.observation_blackout_s
     sigma = scene.measurement_noise_m / scene.illumination_gain
+    estimator = DelayedCV(n, sigma)
     rng = Random(scene.seed)
     pedestrian_phase = rng.uniform(0, 68)
     vehicle_phase = rng.uniform(0, 32)
     samples = []
     captured: dict[int, tuple[float, float]] = {}
+    last_capture_time = 0.0
+    error_sum = nll_sum = 0.0
+    covered = 0
     last_progress = -1
     last_rgb: bytes | None = None
 
@@ -206,7 +212,7 @@ def run_airsim(scene: SceneConfig, endpoint: AirSimEndpoint, *,
         for tick in range(n):
             if cancelled():
                 raise SimulationCancelled()
-            elapsed = tick / _RATE_HZ
+            elapsed = tick / RATE_HZ
             planned = target_position(elapsed * scene.target_speed_mps, scene.target_route_direction)
             world.move(target, *planned, 1.7)
             for index, actor in enumerate(pedestrians):
@@ -227,7 +233,7 @@ def run_airsim(scene: SceneConfig, endpoint: AirSimEndpoint, *,
                         raise RuntimeError(f"AirSim 障碍物 {index + 1} 回读位置与配置不一致")
                     previous_activity[index] = active
 
-            rpc.call("simContinueForTime", 1 / _RATE_HZ)
+            rpc.call("simContinueForTime", 1 / RATE_HZ)
             actual = world.position(target)
             north, east = actual[0] - _ORIGIN_NORTH, actual[1] - _ORIGIN_EAST
             if math.dist((north, east), planned) > 0.05:
@@ -239,18 +245,32 @@ def run_airsim(scene: SceneConfig, endpoint: AirSimEndpoint, *,
             if usable:
                 captured[tick] = (north + rng.gauss(0, sigma), east + rng.gauss(0, sigma))
             observation = captured.pop(tick - delay_ticks, None)
-            samples.append({"time_s": elapsed, "image_timestamp_ns": stamp,
-                            "truth_north_m": north, "truth_east_m": east, "target_pixels": pixels,
-                            "active_obstacles": sum(previous_activity),
-                            "visible": visible, "camera_distance_m": math.dist(camera, actual),
-                            "observed_north_m": observation[0] if observation else None,
-                            "observed_east_m": observation[1] if observation else None,
-                            "received_capture_s": (tick - delay_ticks) / _RATE_HZ if observation else None})
+            packets = [] if observation is None else [(tick - delay_ticks, observation)]
+            mean, covariance = estimator.step(packets)
+            if packets:
+                last_capture_time = max(capture for capture, _ in packets) / RATE_HZ
+            error = mean[:2] - (north, east)
+            squared_error = float(error @ error)
+            is_covered, nll, _ = quality(error, covariance)
+            covered += is_covered
+            error_sum += squared_error
+            nll_sum += nll
+            sample = {"time_s": elapsed, "image_timestamp_ns": stamp,
+                      "truth_north_m": north, "truth_east_m": east,
+                      "estimate_north_m": float(mean[0]), "estimate_east_m": float(mean[1]),
+                      "error_m": math.sqrt(squared_error), "uncertainty_area_m2": ellipse_area(covariance),
+                      "target_pixels": pixels, "active_obstacles": sum(previous_activity),
+                      "visible": visible, "camera_distance_m": math.dist(camera, actual),
+                      "observed_north_m": observation[0] if observation else None,
+                      "observed_east_m": observation[1] if observation else None,
+                      "received_capture_s": (tick - delay_ticks) / RATE_HZ if observation else None}
+            sample.update(estimate_record(mean, covariance, elapsed, last_capture_time))
+            samples.append(sample)
             progress = (tick + 1) * 100 // n
             if progress != last_progress:
                 on_progress(progress)
                 last_progress = progress
-            if on_camera_frame is not None and (tick % _RATE_HZ == 0 or tick == n - 1):
+            if on_camera_frame is not None and (tick % RATE_HZ == 0 or tick == n - 1):
                 last_rgb, rgb_stamp = _image(rpc, 0)
                 on_camera_frame(last_rgb, rgb_stamp)
 
@@ -262,7 +282,10 @@ def run_airsim(scene: SceneConfig, endpoint: AirSimEndpoint, *,
     return {"summary": {"samples": n, "server_version": server_version,
                         "visibility_fraction": sum(row["visible"] for row in samples) / n,
                         "received_observations": sum(row["received_capture_s"] is not None for row in samples),
-                        "mean_camera_distance_m": sum(row["camera_distance_m"] for row in samples) / n},
+                        "mean_camera_distance_m": sum(row["camera_distance_m"] for row in samples) / n,
+                        "rmse_m": math.sqrt(error_sum / n), "coverage_95": covered / n,
+                        "mean_nll": nll_sum / n, "oosm_updates": estimator.oosm_updates,
+                        "estimator_version": ESTIMATOR_VERSION},
             "samples": samples, "last_frame_png": b64encode(image).decode("ascii")}
 
 

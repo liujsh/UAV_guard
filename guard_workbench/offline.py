@@ -1,4 +1,4 @@
-"""Reproducible target state estimation with synthetic observations."""
+"""Reproducible delayed-CV target estimation with synthetic observations."""
 
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -7,12 +7,12 @@ from random import Random
 
 from .route import target_position
 from .scene import SceneConfig
+from .uncertainty import (
+    ESTIMATOR_VERSION, RATE_HZ, DelayedCV, ellipse_area, estimate_record, quality,
+)
 
 
 OFFLINE_BACKEND = "offline-cv-v1"
-_RATE_HZ = 5
-_PROCESS_NOISE = 0.02
-_CHI_SQUARE_95 = 5.9914645471
 
 
 class SimulationCancelled(Exception):
@@ -29,6 +29,30 @@ class Sample:
     error_m: float
     uncertainty_area_m2: float
     received_capture_s: float | None
+    velocity_north_mps: float
+    velocity_east_mps: float
+    covariance_nn_m2: float
+    covariance_ne_m2: float
+    covariance_ee_m2: float
+    observation_age_s: float
+    prediction_1s_north_m: float
+    prediction_1s_east_m: float
+    prediction_1s_cov_nn_m2: float
+    prediction_1s_cov_ne_m2: float
+    prediction_1s_cov_ee_m2: float
+    prediction_1s_area_m2: float
+    prediction_2s_north_m: float
+    prediction_2s_east_m: float
+    prediction_2s_cov_nn_m2: float
+    prediction_2s_cov_ne_m2: float
+    prediction_2s_cov_ee_m2: float
+    prediction_2s_area_m2: float
+    prediction_4s_north_m: float
+    prediction_4s_east_m: float
+    prediction_4s_cov_nn_m2: float
+    prediction_4s_cov_ne_m2: float
+    prediction_4s_cov_ee_m2: float
+    prediction_4s_area_m2: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +62,9 @@ class RunSummary:
     blackout_samples: int
     rmse_m: float
     coverage_95: float
+    mean_nll: float
+    oosm_updates: int
+    estimator_version: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,69 +73,31 @@ class OfflineResult:
     samples: tuple[Sample, ...]
 
 
-@dataclass(frozen=True, slots=True)
-class _Axis:
-    """One axis of a constant velocity Kalman filter."""
-
-    position: float = 0.0
-    velocity: float = 0.0
-    variance: float = 0.25
-    covariance: float = 0.0
-    velocity_variance: float = 0.04
-
-    def predict(self, elapsed: float) -> "_Axis":
-        return _Axis(
-            self.position + elapsed * self.velocity,
-            self.velocity,
-            self.variance + 2 * elapsed * self.covariance + elapsed**2 * self.velocity_variance
-            + _PROCESS_NOISE * elapsed**3 / 3,
-            self.covariance + elapsed * self.velocity_variance + _PROCESS_NOISE * elapsed**2 / 2,
-            self.velocity_variance + _PROCESS_NOISE * elapsed,
-        )
-
-    def observe(self, measured: float, measurement_variance: float) -> "_Axis":
-        innovation = measured - self.position
-        denominator = self.variance + measurement_variance
-        position_gain = self.variance / denominator
-        velocity_gain = self.covariance / denominator
-        return _Axis(
-            self.position + position_gain * innovation,
-            self.velocity + velocity_gain * innovation,
-            self.variance * measurement_variance / denominator,
-            self.covariance * measurement_variance / denominator,
-            self.velocity_variance - velocity_gain * self.covariance,
-        )
-
-
 def run_offline(
     scene: SceneConfig,
     *,
     cancelled: Callable[[], bool] = lambda: False,
     on_progress: Callable[[int], None] = lambda percent: None,
 ) -> OfflineResult:
-    """Sample the configured route and estimate its position as observations arrive.
-
-    Use a fixed observation delay equal to the configured upper bound and an
-    observation blackout centered in the run. Lighting scales measurement noise.
-    """
-    n = math.floor(scene.duration_s * _RATE_HZ) + 1
-    delay_steps = math.ceil(scene.observation_delay_s * _RATE_HZ)
+    """Apply only released observations at their original capture slots."""
+    n = math.floor(scene.duration_s * RATE_HZ) + 1
+    delay_steps = math.ceil(scene.observation_delay_s * RATE_HZ)
     sigma = scene.measurement_noise_m / scene.illumination_gain
     blackout_start = (scene.duration_s - scene.observation_blackout_s) / 2
     blackout_end = blackout_start + scene.observation_blackout_s
     noise = Random(scene.seed)
-    axis = (_Axis(), _Axis())
-    last_capture_time = 0.0
+    estimator = DelayedCV(n, sigma)
     pending: list[tuple[float, float] | None] = []
     samples = []
     received = blocked = covered = 0
-    error_sum = 0.0
+    error_sum = nll_sum = 0.0
+    last_capture_time = 0.0
     progress = -1
 
     for tick in range(n):
         if cancelled():
             raise SimulationCancelled()
-        elapsed = tick / _RATE_HZ
+        elapsed = tick / RATE_HZ
         truth = target_position(elapsed * scene.target_speed_mps, scene.target_route_direction)
         measured = (truth[0] + noise.gauss(0, sigma), truth[1] + noise.gauss(0, sigma))
         in_blackout = blackout_start <= elapsed < blackout_end
@@ -116,25 +105,32 @@ def run_offline(
         blocked += in_blackout
 
         capture_index = tick - delay_steps
+        packets = []
         received_at = None
         if capture_index >= 0 and (observation := pending[capture_index]) is not None:
-            received_at = capture_index / _RATE_HZ
-            axis = tuple(model.predict(received_at - last_capture_time).observe(value, sigma**2)
-                         for model, value in zip(axis, observation))
-            last_capture_time = received_at
+            received_at = capture_index / RATE_HZ
+            packets.append((capture_index, observation))
             received += 1
+        mean, covariance = estimator.step(packets)
+        if packets:
+            last_capture_time = max(capture for capture, _ in packets) / RATE_HZ
 
-        north, east = (model.predict(elapsed - last_capture_time) for model in axis)
-        north_error, east_error = north.position - truth[0], east.position - truth[1]
-        squared_error = north_error**2 + east_error**2
-        covered += north_error**2 / north.variance + east_error**2 / east.variance <= _CHI_SQUARE_95
+        north, east = mean[:2]
+        error = mean[:2] - truth
+        squared_error = float(error @ error)
+        is_covered, nll, _ = quality(error, covariance)
+        covered += is_covered
         error_sum += squared_error
-        area = math.pi * _CHI_SQUARE_95 * math.sqrt(north.variance * east.variance)
-        samples.append(Sample(elapsed, *truth, north.position, east.position,
-                              math.sqrt(squared_error), area, received_at))
+        nll_sum += nll
+        area = ellipse_area(covariance)
+        samples.append(Sample(elapsed, *truth, float(north), float(east),
+                              math.sqrt(squared_error), area, received_at,
+                              **estimate_record(mean, covariance, elapsed, last_capture_time)))
         percent = (tick + 1) * 100 // n
         if percent != progress:
             progress = percent
             on_progress(progress)
 
-    return OfflineResult(RunSummary(n, received, blocked, math.sqrt(error_sum / n), covered / n), tuple(samples))
+    summary = RunSummary(n, received, blocked, math.sqrt(error_sum / n), covered / n,
+                         nll_sum / n, estimator.oosm_updates, ESTIMATOR_VERSION)
+    return OfflineResult(summary, tuple(samples))

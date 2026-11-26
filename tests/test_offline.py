@@ -29,6 +29,13 @@ class OfflineSimulationTests(unittest.TestCase):
         self.assertEqual(result.summary.received_observations, len(captures))
         self.assertEqual(result.summary.blackout_samples, 10)
         self.assertTrue(all(sample.uncertainty_area_m2 > 0 for sample in result.samples))
+        self.assertEqual(result.summary.estimator_version, "DelayedCV-E1-v1")
+        self.assertEqual(result.summary.oosm_updates, 0)
+        self.assertTrue(all(sample.observation_age_s >= 0 for sample in result.samples))
+        for sample in result.samples:
+            for horizon in (1, 2, 4):
+                self.assertGreater(getattr(sample, f"prediction_{horizon}s_area_m2"), 0)
+        self.assertAlmostEqual(result.samples[2].observation_age_s, 0.4)
 
     def test_light_gain_changes_estimation_and_cancellation_is_cooperative(self):
         scene = SceneConfig(duration_s=4)
