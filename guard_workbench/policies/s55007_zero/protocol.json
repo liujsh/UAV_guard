@@ -1,0 +1,385 @@
+{
+  "body_scale": [
+    0.5,
+    0.4,
+    1.7
+  ],
+  "ground_z": 1.02,
+  "uav_z": -48.98,
+  "target_z": 0.17000000000000004,
+  "target_start_xy": [
+    -30.0,
+    -60.0
+  ],
+  "initial_uav_xy": [
+    -32.0,
+    -70.0
+  ],
+  "building_center": [
+    -22.0,
+    -54.0,
+    -13.98
+  ],
+  "road_corners": [
+    [
+      -30.0,
+      -60.0
+    ],
+    [
+      -14.0,
+      -60.0
+    ],
+    [
+      -14.0,
+      -48.0
+    ],
+    [
+      -30.0,
+      -48.0
+    ]
+  ],
+  "flight_bounds": [
+    [
+      -48.0,
+      4.0
+    ],
+    [
+      -80.0,
+      -28.0
+    ]
+  ],
+  "obstacle_boxes": [
+    {
+      "name": "templatecube_rounded_10",
+      "lo": [
+        -37.199999999999996,
+        -31.8,
+        -9.280000000000001
+      ],
+      "hi": [
+        -26.6,
+        -21.2,
+        -3.68
+      ]
+    },
+    {
+      "name": "templatecube_rounded_13",
+      "lo": [
+        -27.200000000000003,
+        -41.8,
+        -9.280000000000001
+      ],
+      "hi": [
+        -16.599999999999998,
+        -31.2,
+        -3.68
+      ]
+    },
+    {
+      "name": "templatecube_rounded_48",
+      "lo": [
+        -27.200000000000003,
+        -31.8,
+        -4.28
+      ],
+      "hi": [
+        -16.599999999999998,
+        -21.2,
+        1.32
+      ]
+    },
+    {
+      "name": "templatecube_rounded_49",
+      "lo": [
+        -27.200000000000003,
+        -31.8,
+        -9.280000000000001
+      ],
+      "hi": [
+        -16.599999999999998,
+        -21.2,
+        -3.68
+      ]
+    },
+    {
+      "name": "templatecube_rounded_52",
+      "lo": [
+        -27.200000000000003,
+        -41.8,
+        -4.28
+      ],
+      "hi": [
+        -16.599999999999998,
+        -31.2,
+        1.32
+      ]
+    },
+    {
+      "name": "templatecube_rounded_55",
+      "lo": [
+        -37.199999999999996,
+        -41.8,
+        -4.28
+      ],
+      "hi": [
+        -26.6,
+        -31.2,
+        1.32
+      ]
+    },
+    {
+      "name": "templatecube_rounded_56",
+      "lo": [
+        -37.199999999999996,
+        -41.8,
+        -9.280000000000001
+      ],
+      "hi": [
+        -26.6,
+        -31.2,
+        -3.68
+      ]
+    },
+    {
+      "name": "templatecube_rounded_6",
+      "lo": [
+        -37.199999999999996,
+        -31.8,
+        -4.28
+      ],
+      "hi": [
+        -26.6,
+        -21.2,
+        1.32
+      ]
+    },
+    {
+      "name": "templatecube_rounded_69",
+      "lo": [
+        -37.199999999999996,
+        -41.8,
+        -14.280000000000001
+      ],
+      "hi": [
+        -26.6,
+        -31.2,
+        -8.68
+      ]
+    },
+    {
+      "name": "templatecube_rounded_70",
+      "lo": [
+        -37.199999999999996,
+        -41.8,
+        -19.28
+      ],
+      "hi": [
+        -26.6,
+        -31.2,
+        -13.68
+      ]
+    },
+    {
+      "name": "controlled_static_building",
+      "lo": [
+        -24.3,
+        -58.3,
+        -29.28
+      ],
+      "hi": [
+        -19.7,
+        -49.7,
+        1.3200000000000003
+      ]
+    }
+  ],
+  "filter_q": 0.056,
+  "shadow_q": [
+    0.02,
+    0.056
+  ],
+  "measurement_variance_floor": 0.25,
+  "range_weight": 0.5,
+  "conditions": [
+    {
+      "name": "steady",
+      "sigma_m": 0.25,
+      "delay_s": 1.0,
+      "steady": true,
+      "crowd": false,
+      "vehicle": false,
+      "temporary": false,
+      "wind": false,
+      "light": false
+    },
+    {
+      "name": "base",
+      "sigma_m": 0.25,
+      "delay_s": 1.0,
+      "steady": false,
+      "crowd": false,
+      "vehicle": false,
+      "temporary": false,
+      "wind": false,
+      "light": false
+    },
+    {
+      "name": "crowd",
+      "sigma_m": 0.25,
+      "delay_s": 1.0,
+      "steady": false,
+      "crowd": true,
+      "vehicle": false,
+      "temporary": false,
+      "wind": false,
+      "light": false
+    },
+    {
+      "name": "vehicle",
+      "sigma_m": 0.25,
+      "delay_s": 1.0,
+      "steady": false,
+      "crowd": false,
+      "vehicle": true,
+      "temporary": false,
+      "wind": false,
+      "light": false
+    },
+    {
+      "name": "temporary",
+      "sigma_m": 0.25,
+      "delay_s": 1.0,
+      "steady": false,
+      "crowd": false,
+      "vehicle": false,
+      "temporary": true,
+      "wind": false,
+      "light": false
+    },
+    {
+      "name": "wind",
+      "sigma_m": 0.25,
+      "delay_s": 1.0,
+      "steady": false,
+      "crowd": false,
+      "vehicle": false,
+      "temporary": false,
+      "wind": true,
+      "light": false
+    },
+    {
+      "name": "light",
+      "sigma_m": 0.25,
+      "delay_s": 1.0,
+      "steady": false,
+      "crowd": false,
+      "vehicle": false,
+      "temporary": false,
+      "wind": false,
+      "light": true
+    },
+    {
+      "name": "noise",
+      "sigma_m": 0.5,
+      "delay_s": 1.0,
+      "steady": false,
+      "crowd": false,
+      "vehicle": false,
+      "temporary": false,
+      "wind": false,
+      "light": false
+    },
+    {
+      "name": "delay",
+      "sigma_m": 0.25,
+      "delay_s": 2.0,
+      "steady": false,
+      "crowd": false,
+      "vehicle": false,
+      "temporary": false,
+      "wind": false,
+      "light": false
+    },
+    {
+      "name": "joint",
+      "sigma_m": 0.5,
+      "delay_s": 2.0,
+      "steady": false,
+      "crowd": true,
+      "vehicle": true,
+      "temporary": true,
+      "wind": true,
+      "light": true
+    }
+  ],
+  "warmup_controls": 12,
+  "final_test_seeds_sealed": [
+    30001,
+    30030
+  ],
+  "survey_source_run": "formal_v8_native_geometry_survey_20261110_r1",
+  "survey_archive_sha256": "b5b115fc85abb98cda95cc1492eb5068c732a8013745f9c80228373a14a15a3a",
+  "illumination_model": "Declared camera gain g=1 or .35 every20s, location sigma=sigma0/g and dropout .2 in dim phase; RGB gain images retained. Segmentation/depth measurement proxy.",
+  "run": "formal_v9_state_risk_residual1920_20261111_r2",
+  "gpu": 1,
+  "adapter": 2,
+  "port": 41453,
+  "learning_seeds": [
+    55007,
+    56007,
+    57007
+  ],
+  "arms": [
+    {
+      "name": "zero",
+      "weight": 0.0,
+      "covariance": "adaptive"
+    },
+    {
+      "name": "adaptive",
+      "weight": 0.5,
+      "covariance": "adaptive"
+    },
+    {
+      "name": "fixed",
+      "weight": 0.5,
+      "covariance": "fixed"
+    }
+  ],
+  "fixed_risk_covariance_diagonal": [
+    1.0,
+    1.0,
+    0.25,
+    0.25
+  ],
+  "residual_velocity_scale": 0.75,
+  "episode_steps": 240,
+  "engineering_episode_steps": 8,
+  "training_steps_per_model": 1920,
+  "training_conditions": [
+    1,
+    7,
+    8,
+    9
+  ],
+  "evaluation_conditions": [
+    1,
+    7,
+    8,
+    9
+  ],
+  "evaluation_scene_seeds": [
+    58001,
+    58002,
+    58003
+  ],
+  "worker_timeout_s": 64800,
+  "parent_timeout_s": 75600,
+  "audit_timeout_s": 5400,
+  "scope": "Nine fresh residual TD3 models, equal common geometric guidance and state inputs; zero/fixed/adaptive state risk; 108 fixed development evaluation episodes",
+  "planned_training_controls": 17280,
+  "planned_evaluation_controls": 25920,
+  "training_pool": null,
+  "training_prior": null,
+  "reason_for_budget": "Fixed 1920 controls per small residual model, 1792 critic/896 actor updates. Bounded midterm state-risk comparison, chosen before performance observation."
+}

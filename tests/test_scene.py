@@ -17,6 +17,14 @@ class SceneConfigTests(unittest.TestCase):
             measurement_noise_m=0.55,
             observation_delay_s=1.6,
             observation_blackout_s=4.0,
+            guard_enabled=True,
+            guard_policy_id="s55007_zero",
+            guard_min_distance_m=5.0,
+            guard_max_distance_m=20.0,
+            guard_max_speed_mps=1.2,
+            wind_north_mps=1.5,
+            wind_east_mps=-0.5,
+            wind_down_mps=0.2,
         )
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "scene.json"
@@ -32,6 +40,11 @@ class SceneConfigTests(unittest.TestCase):
             {"illumination_gain": 0},
             {"pedestrian_count": 5},
             {"vehicle_count": True},
+            {"guard_enabled": 1},
+            {"guard_policy_id": "missing"},
+            {"guard_min_distance_m": 10, "guard_max_distance_m": 8},
+            {"guard_max_speed_mps": 0},
+            {"wind_north_mps": float("inf")},
             {"seed": -1},
             {"duration_s": 2, "observation_delay_s": 3},
             {"duration_s": 20, "obstacles": (Obstacle(0, 0, 1, 1, 1, 15, 45),)},

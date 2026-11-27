@@ -18,17 +18,26 @@ class AirSimRPC:
     def __exit__(self, *_exc_info) -> None:
         self._socket.close()
 
-    def call(self, method: str, *args):
-        self._request_id += 1
-        self._socket.sendall(msgpack.packb([0, self._request_id, method, args], use_bin_type=True))
-        while True:
-            for response in self._unpacker:
-                if not isinstance(response, list) or response[:2] != [1, self._request_id] or len(response) != 4:
-                    raise RuntimeError(f"AirSim 返回无效响应：{method}")
-                if response[2] is not None:
-                    raise RuntimeError(f"AirSim {method}：{response[2]}")
-                return response[3]
-            data = self._socket.recv(65_536)
-            if not data:
-                raise ConnectionError(f"AirSim 在 {method} 调用中断开")
-            self._unpacker.feed(data)
+    def call(self, method: str, *args, timeout: float | None = None):
+        previous_timeout = self._socket.gettimeout()
+        if timeout is not None:
+            if timeout <= 0:
+                raise ValueError("RPC 超时必须是正秒数")
+            self._socket.settimeout(timeout)
+        try:
+            self._request_id += 1
+            self._socket.sendall(msgpack.packb([0, self._request_id, method, args], use_bin_type=True))
+            while True:
+                for response in self._unpacker:
+                    if not isinstance(response, list) or response[:2] != [1, self._request_id] or len(response) != 4:
+                        raise RuntimeError(f"AirSim 返回无效响应：{method}")
+                    if response[2] is not None:
+                        raise RuntimeError(f"AirSim {method}：{response[2]}")
+                    return response[3]
+                data = self._socket.recv(65_536)
+                if not data:
+                    raise ConnectionError(f"AirSim 在 {method} 调用中断开")
+                self._unpacker.feed(data)
+        finally:
+            if timeout is not None:
+                self._socket.settimeout(previous_timeout)

@@ -222,29 +222,46 @@ def rays_blocked(starts: ArrayLike, ends: ArrayLike,
     return blocked
 
 
-def range_risk(grid: ArrayLike, points: ArrayLike,
-               obstacle_boxes: Iterable[tuple[ArrayLike, ArrayLike]] = (),
-               target_z: float = 1.7) -> NDArray:
-    """Evaluate averaged occlusion and 6–18 m guard-band excess for candidates."""
+def range_risk_components(grid: ArrayLike, points: ArrayLike,
+                          obstacle_boxes: Iterable[tuple[ArrayLike, ArrayLike]] = (),
+                          target_z: float = 1.7, minimum_distance_m: float = 6.0,
+                          maximum_distance_m: float = 18.0) -> tuple[NDArray, NDArray]:
+    """Return separate averaged occlusion and guard-band distance costs."""
     candidates = np.atleast_2d(np.asarray(grid, dtype=float))
     representatives = np.atleast_2d(np.asarray(points, dtype=float))
     if candidates.shape[1] != 3 or representatives.shape[1] != 2 or not len(representatives):
         raise ValueError("风险输入应为 N×3 候选位置和至少一个 M×2 代表位置")
+    if not 0 < minimum_distance_m < maximum_distance_m:
+        raise ValueError("守卫带距离必须满足 0 < 最小距离 < 最大距离")
     boxes = tuple(obstacle_boxes)
-    risk = np.zeros(len(candidates))
+    occlusion = np.zeros(len(candidates))
+    distance_cost = np.zeros(len(candidates))
+    normalization = maximum_distance_m - minimum_distance_m
     for point in representatives:
         distance = np.linalg.norm(candidates[:, :2] - point, axis=1)
-        excess = np.maximum(6 - distance, 0) + np.maximum(distance - 18, 0)
-        blocked = rays_blocked(candidates, np.r_[point, target_z], boxes).astype(float)
-        risk += (blocked + excess / 12) / len(representatives)
-    return risk
+        excess = (np.maximum(minimum_distance_m - distance, 0)
+                  + np.maximum(distance - maximum_distance_m, 0))
+        occlusion += rays_blocked(candidates, np.r_[point, target_z], boxes).astype(float) / len(representatives)
+        distance_cost += excess / normalization / len(representatives)
+    return occlusion, distance_cost
+
+
+def range_risk(grid: ArrayLike, points: ArrayLike,
+               obstacle_boxes: Iterable[tuple[ArrayLike, ArrayLike]] = (),
+               target_z: float = 1.7, minimum_distance_m: float = 6.0,
+               maximum_distance_m: float = 18.0) -> NDArray:
+    """Evaluate averaged occlusion and guard-band excess for candidates."""
+    occlusion, distance = range_risk_components(grid, points, obstacle_boxes, target_z,
+                                                minimum_distance_m, maximum_distance_m)
+    return occlusion + distance
 
 
 def state_risk(mean: ArrayLike, covariance: ArrayLike, position: ArrayLike,
                velocity_command: ArrayLike, *, obstacle_boxes: Iterable[tuple[ArrayLike, ArrayLike]] = (),
                uav_z: float = 50.0, target_z: float = 1.7, q: float = FILTER_Q,
                covariance_mode: str = "adaptive", fixed_covariance_diagonal: Sequence[float] | None = None,
-               road_corners: ArrayLike = URBAN_ROUTE) -> float:
+               road_corners: ArrayLike = URBAN_ROUTE, minimum_distance_m: float = 6.0,
+               maximum_distance_m: float = 18.0) -> float:
     """Evaluate one explicit one-second UAV proposal without executing a controller."""
     risk_covariance = np.asarray(covariance, dtype=float)
     if covariance_mode == "fixed":
@@ -259,7 +276,8 @@ def state_risk(mean: ArrayLike, covariance: ArrayLike, position: ArrayLike,
     proposal = np.asarray(position, dtype=float)[:2] + np.asarray(velocity_command, dtype=float)
     future_position = np.r_[proposal, uav_z][None, :]
     points = representative_points(mean, risk_covariance, 1.0, q, road_corners)
-    return float(range_risk(future_position, points, obstacle_boxes, target_z)[0])
+    return float(range_risk(future_position, points, obstacle_boxes, target_z,
+                            minimum_distance_m, maximum_distance_m)[0])
 
 
 def estimate_record(mean: ArrayLike, covariance: ArrayLike, elapsed_s: float,

@@ -3,6 +3,7 @@ from io import BytesIO
 import os
 from pathlib import Path
 import tempfile
+from threading import Event
 import time
 import unittest
 from unittest.mock import patch
@@ -46,6 +47,9 @@ class DesktopTests(unittest.TestCase):
         project_id = window.project.project_id
         self.assertEqual(window.projects.count(), 1)
         window.editor.direction.setCurrentIndex(1)
+        window.editor.guard_enabled.setChecked(True)
+        window.editor.guard_policy.setCurrentIndex(1)
+        window.editor._fields["wind_north_mps"].setValue(2)
         window.editor.seed.setText("4294967295")
         window.time_slider.setValue(128)
         self.assertTrue(window._pending_changes)
@@ -57,7 +61,9 @@ class DesktopTests(unittest.TestCase):
         reopened = Workspace(database)
         self.assertTrue(reopened.sign_in("实验员", "test-password"))
         self.assertEqual(reopened.open_project(project_id).scene,
-                         SceneConfig(seed=4294967295, target_route_direction="reverse"))
+                         SceneConfig(seed=4294967295, target_route_direction="reverse",
+                                     guard_enabled=True, guard_policy_id="s55007_zero",
+                                     wind_north_mps=2))
 
     def test_obstacle_dialog_rejects_reversed_time_window(self):
         editor = SceneEditor()
@@ -150,6 +156,56 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(failed.status, "failed")
         self.assertEqual(failed.message, "测试任务失败")
         self.assertIsNone(workspace.open_run(failed.run_id).result)
+
+    def test_airsim_guard_state_drives_view_and_locks_preview_until_finish(self):
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        workspace = Workspace(Path(directory) / "workspace.sqlite3")
+        workspace.set_up_account("实验员", "test-password")
+        project = workspace.create_project("闭环实验", SceneConfig(duration_s=1, guard_enabled=True))
+        window = MainWindow(workspace)
+        window.show()
+        self.addCleanup(window.hide)
+        window.projects.setCurrentRow(0)
+        window.runs.backend.setCurrentIndex(1)
+        received = []
+        window.runs.run_state.connect(received.append)
+        release = Event()
+        self.addCleanup(release.set)
+        state = {"time_s": 0.2, "estimate_north_m": 0.0, "estimate_east_m": 0.0,
+                 "uav_north_m": -2.0, "uav_east_m": -10.0, "uav_height_m": 50.0,
+                 "guard_distance_m": 10.198, "guard": True, "measurement_valid": True,
+                 "line_of_sight": True, "predicted_state_risk": 0.0,
+                 "applied_velocity_north_mps": 0.2, "applied_velocity_east_mps": 0.1,
+                 "guard_event": None}
+
+        def fake_run(scene, endpoint, *, cancelled, on_progress, on_camera_frame=None, on_state=None):
+            self.assertTrue(scene.guard_enabled)
+            self.assertEqual(endpoint.port, 41451)
+            on_state(state)
+            on_progress(50)
+            if not release.wait(2):
+                raise RuntimeError("测试未释放模拟任务")
+            on_progress(100)
+            return {"summary": {"samples": 1}, "samples": [{"time_s": 0.2, **state}]}
+
+        with patch("guard_workbench.run_panel.run_airsim", side_effect=fake_run):
+            window.runs.start_button.click()
+            deadline = time.monotonic() + 3
+            while not received and time.monotonic() < deadline:
+                QTest.qWait(10)
+            self.assertEqual(len(received), 1)
+            self.assertEqual(received[0]["project_id"], project.project_id)
+            self.assertFalse(window.time_slider.isEnabled())
+            self.assertFalse(window.play_preview.isEnabled())
+            self.assertFalse(window.editor.isEnabled())
+            self.assertEqual(window.time_slider.value(), 2)
+            self.assertIn("守卫有效", window.runs.live_state.text())
+            release.set()
+            self._wait_for_worker(window)
+        self.assertTrue(window.time_slider.isEnabled())
+        self.assertTrue(window.play_preview.isEnabled())
+        self.assertIsNone(window._live_run_state)
+        self.assertEqual(workspace.list_runs(project.project_id)[0].status, "completed")
 
     def _wait_for_worker(self, window):
         deadline = time.monotonic() + 5

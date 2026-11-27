@@ -3,6 +3,7 @@
 from dataclasses import asdict
 from datetime import datetime
 import logging
+import math
 import sqlite3
 from threading import Event
 
@@ -30,6 +31,7 @@ def _local_time(timestamp: str) -> str:
 class _SimulationWorker(QThread):
     progress = Signal(int)
     camera_frame = Signal(bytes, int)
+    state = Signal(dict)
 
     def __init__(self, workspace: Workspace, run: RunRecord, endpoint: AirSimEndpoint | None,
                  parent: QWidget) -> None:
@@ -45,6 +47,7 @@ class _SimulationWorker(QThread):
         callbacks = {"cancelled": self.stop_requested.is_set, "on_progress": self.progress.emit}
         if self.endpoint is not None:
             callbacks["on_camera_frame"] = self.camera_frame.emit
+            callbacks["on_state"] = self.state.emit
         try:
             if self.endpoint is None:
                 result = asdict(run_offline(self.record.scene, **callbacks))
@@ -84,6 +87,7 @@ class _PreflightWorker(QThread):
 class RunPanel(QWidget):
     requested = Signal()
     camera_frame = Signal(bytes, int)
+    run_state = Signal(dict)
     run_started = Signal(str)
     run_finished = Signal(str, str)
 
@@ -146,6 +150,12 @@ class RunPanel(QWidget):
         self.connection.hide()
         self.backend.currentIndexChanged.connect(self._show_connection)
 
+        self.live_state = QLabel("未运行")
+        self.live_state.setObjectName("muted")
+        self.live_state.setWordWrap(True)
+        self.live_state.setAccessibleName("实时守卫状态")
+        layout.addWidget(self.live_state)
+
         self.pages = QTabWidget()
         self.history = QTableWidget(0, 4)
         self.history.setHorizontalHeaderLabels(["开始时间", "后端", "状态", "说明"])
@@ -198,6 +208,7 @@ class RunPanel(QWidget):
         self.worker = _SimulationWorker(self.workspace, record, endpoint, self)
         self.worker.progress.connect(self._progress_changed)
         self.worker.camera_frame.connect(self.camera_frame.emit)
+        self.worker.state.connect(self._state_changed)
         self.worker.finished.connect(self._finish)
         self.progress.reset()
         self.progress.show()
@@ -205,6 +216,8 @@ class RunPanel(QWidget):
         self.cancel_button.show()
         self.log.clear()
         self._progress_mark = -1
+        self.live_state.setText("GuardDrone 正在起飞并校验初始位置…" if record.scene.guard_enabled
+                                else "任务正在运行…")
         self.run_started.emit(record.info.run_id)
         self._reload_history()
         self.worker.start()
@@ -252,6 +265,23 @@ class RunPanel(QWidget):
             self.cancel_button.setEnabled(False)
             self.workspace.append_run_log(self.worker.record.info.run_id, "收到用户停止请求")
 
+    def _state_changed(self, state: dict) -> None:
+        if self.worker is None:
+            return
+        record = self.worker.record
+        speed = math.hypot(state["applied_velocity_north_mps"], state["applied_velocity_east_mps"])
+        guard = "守卫有效" if state["guard"] else ("失观" if not state["measurement_valid"] else "未满足距离带")
+        text = (f"t={state['time_s']:.1f} s · 高度 {state['uav_height_m']:.1f} m · "
+                f"距离 {state['guard_distance_m']:.2f} m · 速度 {speed:.2f} m/s · "
+                f"风险 {state['predicted_state_risk']:.3f} · {guard}")
+        if state.get("guard_event") == "observation_lost":
+            text += " · 发生失观"
+        elif state.get("guard_event") == "observation_reacquired":
+            text += " · 观测恢复"
+        self.live_state.setText(text)
+        self.run_state.emit({**state, "project_id": record.info.project_id,
+                             "run_id": record.info.run_id})
+
     def _progress_changed(self, percent: int) -> None:
         self.progress.setValue(percent)
         if self.worker is not None and percent // 25 > self._progress_mark:
@@ -278,6 +308,7 @@ class RunPanel(QWidget):
         worker.deleteLater()
         self.progress.hide()
         self.cancel_button.hide()
+        self.live_state.setText(f"任务结束：{_STATUSES.get(stored_status, stored_status)}")
         self.run_finished.emit(run_id, stored_status)
         self._reload_history()
         if save_error is not None:
@@ -369,6 +400,17 @@ class RunPanel(QWidget):
                 lines.extend((f"估计器：{summary['estimator_version']}",
                               f"平均位置 NLL：{summary['mean_nll']:.4f}    "
                               f"OOSM 回放更新：{summary['oosm_updates']} 次"))
+            if summary.get("guard_enabled"):
+                lines.extend((f"控制器：{summary['controller_version']}    前瞻 q={summary['controller_q']:g}",
+                              f"策略标识：{summary.get('guard_policy_id', 'geometric')}",
+                              f"守卫时间比例：{summary['guard_fraction']:.1%}    "
+                              f"平均守卫距离：{summary['mean_guard_distance_m']:.3f} m",
+                              f"平均风险：遮挡 {summary['mean_predicted_occlusion_risk']:.4f}    "
+                              f"距离 {summary['mean_predicted_distance_risk']:.4f}    "
+                              f"综合 {summary['mean_predicted_state_risk']:.4f}",
+                              f"平均控制代价：{summary['mean_control_effort']:.4f}    "
+                              f"失观 {summary['observation_losses']} 次    "
+                              f"重见 {summary['observation_reacquisitions']} 次"))
         if run.result is not None:
             try:
                 dialog = ResultDialog(self.workspace, run, lines, self)

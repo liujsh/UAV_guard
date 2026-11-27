@@ -1,0 +1,44 @@
+{
+  "policy_id": "s55007_zero",
+  "version": "td3-residual-s55007-zero-v1",
+  "observation_size": 26,
+  "action_size": 2,
+  "residual_scale": 0.75,
+  "actor_sha256": "7b9e0d601d17bd1aa6a23c6f872566157d602c725f8b3a238cb0ebe33dd02efd",
+  "protocol": {
+    "file": "protocol.json",
+    "sha256": "d4ab6f4d8d5dcec7ab0c53262781499ca9e2102786b6e9ac28be1843946ff005"
+  },
+  "source_model": {
+    "file": "final_model.zip",
+    "sha256": "5cd68f84aac2c581277edd0ebd250cbad66c1c54aaa09f1b0095aa34d6077d70"
+  },
+  "source_summary": {
+    "file": "model_summary.json",
+    "sha256": "b3bc86a87c3cdf9de38395869731e137456deef8479a587c0b95cb6460928285"
+  },
+  "weights": {
+    "file": "weights.npz",
+    "sha256": "99fdfbbb8683f7fc157960048c077ea4260b3da2a196fc2d0bae70058c372d49",
+    "dtype": "float32",
+    "tensors": {
+      "mu.0.weight": [64, 26],
+      "mu.0.bias": [64],
+      "mu.2.weight": [64, 64],
+      "mu.2.bias": [64],
+      "mu.4.weight": [2, 64],
+      "mu.4.bias": [2]
+    }
+  },
+  "reference_runtime": {
+    "python": "3.11.7",
+    "torch": "2.5.1+cu121",
+    "stable_baselines3": "2.7.0",
+    "gymnasium": "1.2.2"
+  },
+  "inference_regression": {
+    "cases": 4,
+    "absolute_tolerance": 2e-7,
+    "scope": "SB3 deterministic actor versus NumPy inference only"
+  }
+}

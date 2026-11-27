@@ -107,6 +107,25 @@ class SceneEditor(QTabWidget):
         self._add_number(uncertainty, "observation_delay_s", "最大延迟", _decimal(0, 3_600, " s"))
         self._add_number(uncertainty, "observation_blackout_s", "遮挡持续时间", _decimal(0, 3_600, " s"))
 
+        guard = self._form_tab("守卫控制")
+        self.guard_enabled = QCheckBox("启用 GuardDrone 闭环（仅 AirSim）")
+        self.guard_enabled.toggled.connect(self._notify_changed)
+        guard.addRow(self.guard_enabled)
+        self.guard_policy = QComboBox()
+        self.guard_policy.addItem("几何参考", "geometric")
+        self.guard_policy.addItem("TD3 残差 · s55007_zero", "s55007_zero")
+        self.guard_policy.currentIndexChanged.connect(self._notify_changed)
+        guard.addRow("控制策略", self.guard_policy)
+        flight_mode = QLabel("50 m / 0.75")
+        flight_mode.setToolTip("固定高度 50 m；残差速度缩放 0.75")
+        guard.addRow("高度 / 残差缩放", flight_mode)
+        self._add_number(guard, "guard_min_distance_m", "最小守卫距离", _decimal(1, 100, " m", 1))
+        self._add_number(guard, "guard_max_distance_m", "最大守卫距离", _decimal(2, 200, " m", 1))
+        self._add_number(guard, "guard_max_speed_mps", "水平速度限幅", _decimal(0.1, 5, " m/s"))
+        self._add_number(guard, "wind_north_mps", "北向风速", _decimal(-30, 30, " m/s"))
+        self._add_number(guard, "wind_east_mps", "东向风速", _decimal(-30, 30, " m/s"))
+        self._add_number(guard, "wind_down_mps", "向下风速", _decimal(-30, 30, " m/s"))
+
         page = QWidget()
         obstacles = QVBoxLayout(page)
         commands = QHBoxLayout()
@@ -147,6 +166,8 @@ class SceneEditor(QTabWidget):
         try:
             self.seed.setText(str(scene.seed))
             self.direction.setCurrentIndex(self.direction.findData(scene.target_route_direction))
+            self.guard_enabled.setChecked(scene.guard_enabled)
+            self.guard_policy.setCurrentIndex(self.guard_policy.findData(scene.guard_policy_id))
             for name, editor in self._fields.items():
                 editor.setValue(getattr(scene, name))
             self._obstacles = list(scene.obstacles)
@@ -160,6 +181,8 @@ class SceneEditor(QTabWidget):
             raise ValueError("随机种子必须是 0–4294967295 之间的整数")
         fields = {name: editor.value() for name, editor in self._fields.items()}
         return SceneConfig(seed=int(seed), target_route_direction=self.direction.currentData(),
+                           guard_enabled=self.guard_enabled.isChecked(),
+                           guard_policy_id=self.guard_policy.currentData(),
                            obstacles=tuple(self._obstacles), **fields)
 
     def _refresh_obstacles(self, row: int = -1) -> None:

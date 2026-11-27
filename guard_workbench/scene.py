@@ -9,6 +9,7 @@ import tempfile
 
 FORMAT_VERSION = 1
 CITY_TEMPLATE = "urban_occlusion"
+GUARD_POLICY_IDS = ("geometric", "s55007_zero")
 
 
 def _number(field: str, value: object, minimum: float, maximum: float) -> None:
@@ -61,6 +62,14 @@ class SceneConfig:
     measurement_noise_m: float = 0.25
     observation_delay_s: float = 0.0
     observation_blackout_s: float = 0.0
+    guard_enabled: bool = False
+    guard_policy_id: str = "geometric"
+    guard_min_distance_m: float = 6.0
+    guard_max_distance_m: float = 18.0
+    guard_max_speed_mps: float = 1.5
+    wind_north_mps: float = 0.0
+    wind_east_mps: float = 0.0
+    wind_down_mps: float = 0.0
 
     def __post_init__(self) -> None:
         if self.template_id != CITY_TEMPLATE:
@@ -81,6 +90,17 @@ class SceneConfig:
         _number("measurement_noise_m", self.measurement_noise_m, 0.01, 10)
         _number("observation_delay_s", self.observation_delay_s, 0, self.duration_s)
         _number("observation_blackout_s", self.observation_blackout_s, 0, self.duration_s)
+        if type(self.guard_enabled) is not bool:
+            raise ValueError("guard_enabled 必须是布尔值")
+        if self.guard_policy_id not in GUARD_POLICY_IDS:
+            raise ValueError("guard_policy_id 不属于已注册的控制策略")
+        _number("guard_min_distance_m", self.guard_min_distance_m, 1, 100)
+        _number("guard_max_distance_m", self.guard_max_distance_m, 2, 200)
+        if self.guard_max_distance_m <= self.guard_min_distance_m:
+            raise ValueError("guard_max_distance_m 必须大于 guard_min_distance_m")
+        _number("guard_max_speed_mps", self.guard_max_speed_mps, 0.1, 5)
+        for field in ("wind_north_mps", "wind_east_mps", "wind_down_mps"):
+            _number(field, getattr(self, field), -30, 30)
         if not isinstance(self.obstacles, tuple) or len(self.obstacles) > 32:
             raise ValueError("obstacles 应为最多包含 32 项的障碍物元组")
         for index, obstacle in enumerate(self.obstacles):

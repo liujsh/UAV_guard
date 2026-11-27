@@ -1,0 +1,12 @@
+{
+  "learning_seed": 55007,
+  "arm": "zero",
+  "controls": 1920,
+  "critic_updates": 1792,
+  "initial_hashes": {
+    "actor": "a2326ce9b8400741926c43f72677c7e89d9924c51c23e3c7c812869c60da95d1",
+    "critic": "d97fd24238428dc3fffc3c6d63e6d0778013ab34eec0f98dc48fdb186f088bae"
+  },
+  "actor_sha": "7b9e0d601d17bd1aa6a23c6f872566157d602c725f8b3a238cb0ebe33dd02efd",
+  "critic_sha": "7801b8deb4f91fd05e5ea676c5e40592aba38703cc18b082f3115923b505c1d6"
+}
