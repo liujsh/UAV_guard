@@ -95,6 +95,7 @@ class MainWindow(QMainWindow):
         self.project: Project | None = None
         self._pending_changes = False
         self._running_project_id: str | None = None
+        self._live_run_state: dict | None = None
         self.setWindowTitle(TITLE)
         self.setMinimumSize(1100, 700)
         self.resize(1440, 860)
@@ -208,6 +209,7 @@ class MainWindow(QMainWindow):
         self.runs.camera_frame.connect(self.camera.show_frame)
         self.runs.run_started.connect(self._run_started)
         self.runs.run_finished.connect(self._run_finished)
+        self.runs.run_state.connect(self._run_state_changed)
         self.runs.backend.currentTextChanged.connect(self._backend_changed)
         self.run_dock = QDockWidget("任务与日志", self)
         self.run_dock.setObjectName("runDock")
@@ -252,13 +254,14 @@ class MainWindow(QMainWindow):
         self._pending_changes = False
         self.preview_timer.stop()
         self.play_preview.setText("播放")
+        running = project is not None and project.project_id == self._running_project_id
         for control in self._preview_controls:
-            control.setEnabled(project is not None)
-        editable = project is not None and project.project_id != self._running_project_id
+            control.setEnabled(project is not None and not running)
+        editable = project is not None and not running
         self.editor.setEnabled(editable)
         self.rename_button.setEnabled(project is not None)
         self.save_button.setEnabled(editable)
-        self.time_slider.setEnabled(project is not None)
+        self.time_slider.setEnabled(project is not None and not running)
         self.time_slider.blockSignals(True)
         self.time_slider.setValue(0)
         self.time_slider.blockSignals(False)
@@ -304,7 +307,8 @@ class MainWindow(QMainWindow):
         self.time_slider.blockSignals(False)
         elapsed = min(self.time_slider.value() / 10, config.duration_s)
         self.time_label.setText(f"{elapsed:.1f} s / {config.duration_s:g} s")
-        self.viewport.show_scene(config, elapsed)
+        live = (self._live_run_state if self.project.project_id == self._running_project_id else None)
+        self.viewport.show_scene(config, elapsed, live)
 
     def _scene_changed(self) -> None:
         if self.project is None:
@@ -336,17 +340,41 @@ class MainWindow(QMainWindow):
 
     def _run_started(self, _run_id: str) -> None:
         self._running_project_id = self.project.project_id if self.project is not None else None
+        self._live_run_state = None
+        self.preview_timer.stop()
+        self.play_preview.setText("播放")
+        for control in self._preview_controls:
+            control.setEnabled(False)
+        self.time_slider.setEnabled(False)
         self.editor.setEnabled(False)
         self.save_button.setEnabled(False)
         if self.runs.backend.currentText() == "AirSim":
             self.camera.clear("AirSim 任务已启动，正在等待真实相机帧…")
-        self.statusBar().showMessage("任务运行中；运行项目的场景配置已锁定")
+        self.statusBar().showMessage("任务运行中；运行项目的场景配置和预览控制已锁定")
+
+    def _run_state_changed(self, state: dict) -> None:
+        if state.get("project_id") != self._running_project_id:
+            return
+        self._live_run_state = state
+        if self.project is None or self.project.project_id != self._running_project_id:
+            return
+        elapsed = min(float(state["time_s"]), self.project.scene.duration_s)
+        self.time_slider.blockSignals(True)
+        self.time_slider.setValue(round(elapsed * 10))
+        self.time_slider.blockSignals(False)
+        self.time_label.setText(f"{elapsed:.1f} s / {self.project.scene.duration_s:g} s")
+        self.viewport.show_scene(self.project.scene, elapsed, state)
 
     def _run_finished(self, _run_id: str, status: str) -> None:
         self._running_project_id = None
+        self._live_run_state = None
         editable = self.project is not None
         self.editor.setEnabled(editable)
         self.save_button.setEnabled(editable)
+        self.time_slider.setEnabled(editable)
+        for control in self._preview_controls:
+            control.setEnabled(editable)
+        self._refresh_preview()
         self.statusBar().showMessage(f"任务状态：{status}")
 
     def _backend_changed(self, backend: str) -> None:

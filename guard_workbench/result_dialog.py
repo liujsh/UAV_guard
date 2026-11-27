@@ -86,8 +86,9 @@ class ResultChart(QWidget):
         self.time_cursor.setVisible(not self.trajectory)
         for series in self.series:
             xs, ys = zip(*series.points)
-            pen = pg.mkPen(series.color, width=2,
-                           style=Qt.PenStyle.DashLine if series.dashed else Qt.PenStyle.SolidLine)
+            style = (Qt.PenStyle.DotLine if series.dotted else
+                     Qt.PenStyle.DashLine if series.dashed else Qt.PenStyle.SolidLine)
+            pen = pg.mkPen(series.color, width=2, style=style)
             self.plot.plot(xs, ys, pen=pen, name=series.name, connect="finite")
         if self.trajectory and self.prediction is not None:
             prediction = self.prediction
@@ -277,6 +278,10 @@ class ResultDialog(QDialog):
                 values.append(f"可见 {summary['visibility_fraction']:.1%}")
             if "rmse_m" in summary:
                 values.append(f"RMSE {summary['rmse_m']:.3f} m")
+            if summary.get("guard_enabled"):
+                values.extend((f"守卫 {summary['guard_fraction']:.1%}",
+                               f"距离 {summary['mean_guard_distance_m']:.2f} m",
+                               f"风险 {summary['mean_predicted_state_risk']:.3f}"))
             cells = ["本次" if row == 0 else "对照", run.info.run_id[:8], str(run.scene.seed),
                      str(summary["samples"]), " · ".join(values)]
             for column, text in enumerate(cells):

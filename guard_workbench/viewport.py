@@ -36,7 +36,8 @@ class SceneViewport(QGraphicsView):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setMinimumWidth(360)
 
-    def show_scene(self, config: SceneConfig | None, elapsed_s: float = 0) -> None:
+    def show_scene(self, config: SceneConfig | None, elapsed_s: float = 0,
+                   run_state: dict | None = None) -> None:
         drawing = self._drawing
         drawing.clear()
         drawing.setBackgroundBrush(QColor("#0E1013"))
@@ -69,6 +70,24 @@ class SceneViewport(QGraphicsView):
             target = _point(*target_position(elapsed_s * config.target_speed_mps, config.target_route_direction))
             drawing.addEllipse(target.x() - 0.36, target.y() - 0.36, 0.72, 0.72,
                                _pen("#E6E8EB", 2), QColor("#338CED")).setZValue(3)
+            if run_state is not None and "uav_north_m" in run_state:
+                estimate = _point(run_state["estimate_north_m"], run_state["estimate_east_m"])
+                radius = config.guard_max_distance_m
+                frame = frame.united(QRectF(estimate.x() - radius - 2, estimate.y() - radius - 2,
+                                            2 * radius + 4, 2 * radius + 4))
+                for distance, style in ((config.guard_min_distance_m, Qt.PenStyle.DashLine),
+                                        (config.guard_max_distance_m, Qt.PenStyle.DotLine)):
+                    pen = _pen("#65717D", 1)
+                    pen.setStyle(style)
+                    drawing.addEllipse(estimate.x() - distance, estimate.y() - distance,
+                                       2 * distance, 2 * distance, pen).setZValue(1)
+                drone = _point(run_state["uav_north_m"], run_state["uav_east_m"])
+                sight_color = "#0AAC23" if run_state.get("line_of_sight") else "#DC3C3D"
+                sight_pen = _pen(sight_color, 1.2)
+                sight_pen.setStyle(Qt.PenStyle.DashLine)
+                drawing.addLine(drone.x(), drone.y(), estimate.x(), estimate.y(), sight_pen).setZValue(2)
+                drawing.addEllipse(drone.x() - 0.48, drone.y() - 0.48, 0.96, 0.96,
+                                   _pen("#E6E8EB", 2), QColor("#121519")).setZValue(4)
 
         # Keep grid line counts bounded for scenes with distant obstacles.
         step = max(2, math.ceil(max(frame.width(), frame.height()) / 36))

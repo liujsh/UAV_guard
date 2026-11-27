@@ -13,11 +13,17 @@ from uuid import uuid4
 from PIL import Image
 
 from .airsim_rpc import AirSimRPC
+from .control import (
+    CONTROLLER_VERSION, CONTROL_Q, GeometricController, guard_distance, obstacle_boxes,
+)
+from .flight import TARGET_Z_NED_M, GuardDrone
 from .offline import SimulationCancelled
+from .policy import ResidualPolicy
 from .route import target_position
 from .scene import SceneConfig
 from .uncertainty import (
-    ESTIMATOR_VERSION, RATE_HZ, DelayedCV, ellipse_area, estimate_record, quality,
+    ESTIMATOR_VERSION, INITIAL_COVARIANCE, INITIAL_MEAN, RATE_HZ, DelayedCV,
+    ellipse_area, estimate_record, quality, rays_blocked,
 )
 
 
@@ -174,7 +180,8 @@ def inspect_airsim(endpoint: AirSimEndpoint) -> dict:
 
 def run_airsim(scene: SceneConfig, endpoint: AirSimEndpoint, *,
                cancelled: Callable[[], bool], on_progress: Callable[[int], None],
-               on_camera_frame: Callable[[bytes, int], None] | None = None) -> dict:
+               on_camera_frame: Callable[[bytes, int], None] | None = None,
+               on_state: Callable[[dict], None] | None = None) -> dict:
     if cancelled():
         raise SimulationCancelled()
     n = math.floor(scene.duration_s * RATE_HZ) + 1
@@ -193,6 +200,14 @@ def run_airsim(scene: SceneConfig, endpoint: AirSimEndpoint, *,
     covered = 0
     last_progress = -1
     last_rgb: bytes | None = None
+    policy = (ResidualPolicy.load(scene.guard_policy_id)
+              if scene.guard_enabled and scene.guard_policy_id != "geometric" else None)
+    controller = GeometricController(scene, policy) if scene.guard_enabled else None
+    control_mean = INITIAL_MEAN.copy()
+    control_covariance = INITIAL_COVARIANCE.copy()
+    control_age_s = 0.0
+    previous_measurement_valid = False
+    drone = None
 
     with _world(endpoint, cancelled) as world:
         rpc = world.rpc
@@ -200,93 +215,177 @@ def run_airsim(scene: SceneConfig, endpoint: AirSimEndpoint, *,
         camera = _xyz(rpc.call("simGetCameraInfo", _CAMERA, "", True)["pose"]["position"])
         if _target_pixels(_image(rpc, 5)[0]):
             raise ValueError("场景已使用目标分割颜色，请使用干净的专用 Blocks 实例")
-        target = world.spawn("target", 0, 0, (0.5, 0.4, 1.7))
-        world.spawn("building", 8, 6, (4.6, 8.6, 30))
-        pedestrians = [world.spawn(f"person_{index}", -1.5, -1.5, (0.5, 0.4, 1.7))
-                       for index in range(scene.pedestrian_count)]
-        vehicle = world.spawn("vehicle", 0, -4, (4.5, 1.8, 1.6)) if scene.vehicle_count else None
-        obstacles = [world.spawn(f"obstacle_{index}", item.north_m, -150 - index,
-                                 (item.length_m, item.width_m, item.height_m))
-                     for index, item in enumerate(scene.obstacles)]
-        previous_activity = [False] * len(obstacles)
-        for tick in range(n):
-            if cancelled():
-                raise SimulationCancelled()
-            elapsed = tick / RATE_HZ
-            planned = target_position(elapsed * scene.target_speed_mps, scene.target_route_direction)
-            world.move(target, *planned, 1.7)
-            for index, actor in enumerate(pedestrians):
-                # Walk along the perimeter of the original 19 x 15 m sidewalk.
-                along = (pedestrian_phase + 17 * index + elapsed * 0.72) % 68
-                north, east = _sidewalk(along)
-                world.move(actor, north, east, 1.7)
-            if vehicle:
-                along = (vehicle_phase + elapsed * 2.5) % 32
-                world.move(vehicle, min(along, 32 - along), -4, 1.6)
-            for index, (actor, item) in enumerate(zip(obstacles, scene.obstacles)):
-                active = item.is_active(elapsed)
-                if active != previous_activity[index]:
-                    east = item.east_m if active else -150 - index
-                    world.move(actor, item.north_m, east, item.height_m)
-                    expected = _xyz(_pose(item.north_m, east, item.height_m)["position"])
-                    if math.dist(world.position(actor), expected) > 0.05:
-                        raise RuntimeError(f"AirSim 障碍物 {index + 1} 回读位置与配置不一致")
-                    previous_activity[index] = active
+        drone = GuardDrone(rpc, scene, cancelled) if scene.guard_enabled else None
+        try:
+            target = world.spawn("target", 0, 0, (0.5, 0.4, 1.7))
+            world.spawn("building", 8, 6, (4.6, 8.6, 30))
+            pedestrians = [world.spawn(f"person_{index}", -1.5, -1.5, (0.5, 0.4, 1.7))
+                           for index in range(scene.pedestrian_count)]
+            vehicle = world.spawn("vehicle", 0, -4, (4.5, 1.8, 1.6)) if scene.vehicle_count else None
+            obstacles = [world.spawn(f"obstacle_{index}", item.north_m, -150 - index,
+                                     (item.length_m, item.width_m, item.height_m))
+                         for index, item in enumerate(scene.obstacles)]
+            previous_activity = [False] * len(obstacles)
+            drone_state = drone.start() if drone is not None else None
+            for tick in range(n):
+                if cancelled():
+                    raise SimulationCancelled()
+                elapsed = tick / RATE_HZ
+                planned = target_position(elapsed * scene.target_speed_mps, scene.target_route_direction)
+                world.move(target, *planned, 1.7)
+                for index, actor in enumerate(pedestrians):
+                    # Walk along the perimeter of the original 19 x 15 m sidewalk.
+                    along = (pedestrian_phase + 17 * index + elapsed * 0.72) % 68
+                    north, east = _sidewalk(along)
+                    world.move(actor, north, east, 1.7)
+                if vehicle:
+                    along = (vehicle_phase + elapsed * 2.5) % 32
+                    world.move(vehicle, min(along, 32 - along), -4, 1.6)
+                for index, (actor, item) in enumerate(zip(obstacles, scene.obstacles)):
+                    active = item.is_active(elapsed)
+                    if active != previous_activity[index]:
+                        east = item.east_m if active else -150 - index
+                        world.move(actor, item.north_m, east, item.height_m)
+                        expected = _xyz(_pose(item.north_m, east, item.height_m)["position"])
+                        if math.dist(world.position(actor), expected) > 0.05:
+                            raise RuntimeError(f"AirSim 障碍物 {index + 1} 回读位置与配置不一致")
+                        previous_activity[index] = active
 
-            rpc.call("simContinueForTime", 1 / RATE_HZ)
-            actual = world.position(target)
-            north, east = actual[0] - _ORIGIN_NORTH, actual[1] - _ORIGIN_EAST
-            if math.dist((north, east), planned) > 0.05:
-                raise RuntimeError("AirSim 目标回读位置与路线偏差超过 0.05 m")
-            mask, stamp = _image(rpc, 5)
-            pixels = _target_pixels(mask)
-            visible = pixels > 0
-            usable = pixels * scene.illumination_gain >= 4 and not blackout_start <= elapsed < blackout_end
-            if usable:
-                captured[tick] = (north + rng.gauss(0, sigma), east + rng.gauss(0, sigma))
-            observation = captured.pop(tick - delay_ticks, None)
-            packets = [] if observation is None else [(tick - delay_ticks, observation)]
-            mean, covariance = estimator.step(packets)
-            if packets:
-                last_capture_time = max(capture for capture, _ in packets) / RATE_HZ
-            error = mean[:2] - (north, east)
-            squared_error = float(error @ error)
-            is_covered, nll, _ = quality(error, covariance)
-            covered += is_covered
-            error_sum += squared_error
-            nll_sum += nll
-            sample = {"time_s": elapsed, "image_timestamp_ns": stamp,
-                      "truth_north_m": north, "truth_east_m": east,
-                      "estimate_north_m": float(mean[0]), "estimate_east_m": float(mean[1]),
-                      "error_m": math.sqrt(squared_error), "uncertainty_area_m2": ellipse_area(covariance),
-                      "target_pixels": pixels, "active_obstacles": sum(previous_activity),
-                      "visible": visible, "camera_distance_m": math.dist(camera, actual),
-                      "observed_north_m": observation[0] if observation else None,
-                      "observed_east_m": observation[1] if observation else None,
-                      "received_capture_s": (tick - delay_ticks) / RATE_HZ if observation else None}
-            sample.update(estimate_record(mean, covariance, elapsed, last_capture_time))
-            samples.append(sample)
-            progress = (tick + 1) * 100 // n
-            if progress != last_progress:
-                on_progress(progress)
-                last_progress = progress
-            if on_camera_frame is not None and (tick % RATE_HZ == 0 or tick == n - 1):
-                last_rgb, rgb_stamp = _image(rpc, 0)
-                on_camera_frame(last_rgb, rgb_stamp)
+                boxes = obstacle_boxes(scene, elapsed) if drone is not None else ()
+                decision = None
+                if drone is not None and drone_state is not None and controller is not None:
+                    decision = controller.decide(
+                        control_mean, control_covariance, drone_state, tick=tick,
+                        total_steps=n - 1, observation_age_s=control_age_s,
+                        measurement_valid=previous_measurement_valid, obstacle_boxes=boxes)
+                    drone_state = drone.command(*decision.applied)
+                else:
+                    rpc.call("simContinueForTime", 1 / RATE_HZ)
+                actual = world.position(target)
+                north, east = actual[0] - _ORIGIN_NORTH, actual[1] - _ORIGIN_EAST
+                if math.dist((north, east), planned) > 0.05:
+                    raise RuntimeError("AirSim 目标回读位置与路线偏差超过 0.05 m")
+                mask, stamp = _image(rpc, 5)
+                pixels = _target_pixels(mask)
+                visible = pixels > 0
+                usable = pixels * scene.illumination_gain >= 4 and not blackout_start <= elapsed < blackout_end
+                if usable:
+                    captured[tick] = (north + rng.gauss(0, sigma), east + rng.gauss(0, sigma))
+                observation = captured.pop(tick - delay_ticks, None)
+                packets = [] if observation is None else [(tick - delay_ticks, observation)]
+                mean, covariance = estimator.step(packets)
+                if packets:
+                    last_capture_time = max(capture for capture, _ in packets) / RATE_HZ
+                error = mean[:2] - (north, east)
+                squared_error = float(error @ error)
+                is_covered, nll, _ = quality(error, covariance)
+                covered += is_covered
+                error_sum += squared_error
+                nll_sum += nll
+                sample = {"time_s": elapsed, "image_timestamp_ns": stamp,
+                          "truth_north_m": north, "truth_east_m": east,
+                          "estimate_north_m": float(mean[0]), "estimate_east_m": float(mean[1]),
+                          "error_m": math.sqrt(squared_error), "uncertainty_area_m2": ellipse_area(covariance),
+                          "target_pixels": pixels, "active_obstacles": sum(previous_activity),
+                          "visible": visible, "camera_distance_m": math.dist(camera, actual),
+                          "observed_north_m": observation[0] if observation else None,
+                          "observed_east_m": observation[1] if observation else None,
+                          "received_capture_s": (tick - delay_ticks) / RATE_HZ if observation else None}
+                sample.update(estimate_record(mean, covariance, elapsed, last_capture_time))
+                if drone_state is not None and decision is not None:
+                    distance = guard_distance(drone_state, north, east)
+                    guard = bool(usable and scene.guard_min_distance_m <= distance <= scene.guard_max_distance_m)
+                    event = None
+                    if previous_measurement_valid and not usable:
+                        event = "observation_lost"
+                    elif tick > 0 and not previous_measurement_valid and usable:
+                        event = "observation_reacquired"
+                    sight_start = [[drone_state.north_m, drone_state.east_m, drone_state.z_ned_m]]
+                    sight_end = [[float(mean[0]), float(mean[1]), TARGET_Z_NED_M]]
+                    line_of_sight = not bool(rays_blocked(sight_start, sight_end, boxes)[0])
+                    sample.update({
+                        "uav_timestamp_ns": drone_state.timestamp_ns,
+                        "uav_north_m": drone_state.north_m, "uav_east_m": drone_state.east_m,
+                        "uav_height_m": drone_state.height_m, "uav_z_ned_m": drone_state.z_ned_m,
+                        "uav_velocity_north_mps": drone_state.velocity_north_mps,
+                        "uav_velocity_east_mps": drone_state.velocity_east_mps,
+                        "uav_velocity_down_mps": drone_state.velocity_down_mps,
+                        "geometric_goal_north_m": float(decision.goal[0]),
+                        "geometric_goal_east_m": float(decision.goal[1]),
+                        "base_proposal_north_mps": float(decision.base_proposal[0]),
+                        "base_proposal_east_mps": float(decision.base_proposal[1]),
+                        "residual_action_north": float(decision.residual_action[0]),
+                        "residual_action_east": float(decision.residual_action[1]),
+                        "control_proposal_north_mps": float(decision.proposal[0]),
+                        "control_proposal_east_mps": float(decision.proposal[1]),
+                        "applied_velocity_north_mps": float(decision.applied[0]),
+                        "applied_velocity_east_mps": float(decision.applied[1]),
+                        "predicted_occlusion_risk": decision.predicted_occlusion_risk,
+                        "predicted_distance_risk": decision.predicted_distance_risk,
+                        "predicted_state_risk": decision.predicted_state_risk,
+                        "control_effort": 0.02 * sum(float(value) ** 2 for value in decision.applied) / 2,
+                        "goal_candidates": decision.goal_candidates,
+                        "goal_base_cost": decision.goal_base_cost, "goal_risk": decision.goal_risk,
+                        "policy_observation": decision.observation.tolist(),
+                        "guard_policy_id": scene.guard_policy_id,
+                        "controller_version": CONTROLLER_VERSION if policy is None else policy.version,
+                        "controller_q": CONTROL_Q,
+                        "guard_distance_m": distance, "measurement_valid": usable, "guard": guard,
+                        "line_of_sight": line_of_sight, "guard_event": event,
+                    })
+                    control_mean = mean.copy()
+                    control_covariance = covariance.copy()
+                    control_age_s = sample["observation_age_s"]
+                    previous_measurement_valid = usable
+                    if on_state is not None:
+                        on_state({key: sample[key] for key in (
+                            "time_s", "estimate_north_m", "estimate_east_m", "uav_north_m",
+                            "uav_east_m", "uav_height_m", "guard_distance_m", "guard",
+                            "measurement_valid", "line_of_sight", "predicted_state_risk",
+                            "applied_velocity_north_mps", "applied_velocity_east_mps", "guard_event",
+                        )})
+                samples.append(sample)
+                progress = (tick + 1) * 100 // n
+                if progress != last_progress:
+                    on_progress(progress)
+                    last_progress = progress
+                if on_camera_frame is not None and (tick % RATE_HZ == 0 or tick == n - 1):
+                    last_rgb, rgb_stamp = _image(rpc, 0)
+                    on_camera_frame(last_rgb, rgb_stamp)
+        finally:
+            if drone is not None:
+                drone.stop()
 
         if last_rgb is None:
             image, _ = _image(rpc, 0)
         else:
             image = last_rgb
 
-    return {"summary": {"samples": n, "server_version": server_version,
-                        "visibility_fraction": sum(row["visible"] for row in samples) / n,
-                        "received_observations": sum(row["received_capture_s"] is not None for row in samples),
-                        "mean_camera_distance_m": sum(row["camera_distance_m"] for row in samples) / n,
-                        "rmse_m": math.sqrt(error_sum / n), "coverage_95": covered / n,
-                        "mean_nll": nll_sum / n, "oosm_updates": estimator.oosm_updates,
-                        "estimator_version": ESTIMATOR_VERSION},
-            "samples": samples, "last_frame_png": b64encode(image).decode("ascii")}
+    summary = {"samples": n, "server_version": server_version,
+               "visibility_fraction": sum(row["visible"] for row in samples) / n,
+               "received_observations": sum(row["received_capture_s"] is not None for row in samples),
+               "mean_camera_distance_m": sum(row["camera_distance_m"] for row in samples) / n,
+               "rmse_m": math.sqrt(error_sum / n), "coverage_95": covered / n,
+               "mean_nll": nll_sum / n, "oosm_updates": estimator.oosm_updates,
+               "estimator_version": ESTIMATOR_VERSION}
+    if scene.guard_enabled:
+        summary.update({
+            "guard_enabled": True, "guard_policy_id": scene.guard_policy_id,
+            "controller_version": controller.version if controller is not None else CONTROLLER_VERSION,
+            "controller_q": CONTROL_Q,
+            "initialization_controls": drone.initialization_controls if drone is not None else 0,
+            "guard_fraction": sum(row["guard"] for row in samples) / n,
+            "valid_measurement_fraction": sum(row["measurement_valid"] for row in samples) / n,
+            "mean_guard_distance_m": sum(row["guard_distance_m"] for row in samples) / n,
+            "mean_predicted_occlusion_risk": sum(row["predicted_occlusion_risk"] for row in samples) / n,
+            "mean_predicted_distance_risk": sum(row["predicted_distance_risk"] for row in samples) / n,
+            "mean_predicted_state_risk": sum(row["predicted_state_risk"] for row in samples) / n,
+            "mean_control_effort": sum(row["control_effort"] for row in samples) / n,
+            "observation_losses": sum(row["guard_event"] == "observation_lost" for row in samples),
+            "observation_reacquisitions": sum(row["guard_event"] == "observation_reacquired" for row in samples),
+        })
+    return {"summary": summary, "samples": samples,
+            "last_frame_png": b64encode(image).decode("ascii")}
 
 
 def _sidewalk(distance: float) -> tuple[float, float]:

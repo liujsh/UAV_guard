@@ -17,7 +17,7 @@ try {
     if ($runtime.Count -eq 0) { throw 'PySide6 runtime DLLs are missing' }
     & $Python -m PyInstaller --noconfirm --windowed --onedir --name UAVGuardWorkbench `
         --paths . --specpath build --workpath build/pyinstaller-isolated --distpath dist @runtime `
-        packaging/windows_entry.py
+        --add-data 'guard_workbench/policies;guard_workbench/policies' packaging/windows_entry.py
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed ($LASTEXITCODE)" }
 } finally {
     $env:Path = $previousPath

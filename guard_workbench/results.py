@@ -25,6 +25,15 @@ AIRSIM_METRICS = {
     "目标像素数": ("target_pixels", "像素数"),
     "相机可见性": ("visible", "可见性  0 / 1"),
     **ESTIMATION_METRICS,
+    "守卫距离": ("guard_distance_m", "距离 / m"),
+    "有效观测": ("measurement_valid", "有效性  0 / 1"),
+    "守卫判定": ("guard", "守卫  0 / 1"),
+    "预测遮挡风险": ("predicted_occlusion_risk", "风险"),
+    "预测距离风险": ("predicted_distance_risk", "风险"),
+    "预测综合风险": ("predicted_state_risk", "风险"),
+    "北向残差动作": ("residual_action_north", "归一化动作"),
+    "东向残差动作": ("residual_action_east", "归一化动作"),
+    "控制代价": ("control_effort", "0.02 × 均方速度"),
 }
 
 
@@ -35,6 +44,7 @@ class Series:
     points: tuple[tuple[float, float], ...]
     times: tuple[float, ...]
     dashed: bool = False
+    dotted: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +80,9 @@ def chart_data(runs: list[RunRecord], metric: str) -> tuple[list[Series], str, s
             if rows and "estimate_north_m" in rows[0]:
                 estimate = tuple((row["estimate_east_m"], row["estimate_north_m"]) for row in rows)
                 series.append(Series(label + "估计", color, estimate, times, dashed=True))
+            if rows and "uav_north_m" in rows[0]:
+                uav = tuple((row["uav_east_m"], row["uav_north_m"]) for row in rows)
+                series.append(Series(label + "无人机", color, uav, times, dotted=True))
             continue
         definition = metrics(run.info.backend).get(metric)
         if definition is None:

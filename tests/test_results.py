@@ -64,3 +64,33 @@ class ResultTests(unittest.TestCase):
         self.assertEqual([row["run_id"] for row in saved], ["a", "a", "b"])
         self.assertEqual([row["visible"] for row in saved], ["0", "1", "0"])
         self.assertEqual([row["received_capture_s"] for row in saved], ["", "0", ""])
+
+    def test_guard_metrics_and_uav_trajectory_use_stored_samples(self):
+        rows = [{"time_s": 0.0, "truth_north_m": 0.0, "truth_east_m": 0.0,
+                 "estimate_north_m": 0.1, "estimate_east_m": 0.0,
+                 "uav_north_m": -2.0, "uav_east_m": -10.0,
+                 "guard_distance_m": 10.198, "measurement_valid": True, "guard": True,
+                 "predicted_occlusion_risk": 0.0, "predicted_distance_risk": 0.0,
+                 "predicted_state_risk": 0.0, "residual_action_north": -0.5,
+                 "residual_action_east": 0.25, "control_effort": 0.002}]
+        run = _run("guard", AIRSIM_BACKEND, SceneConfig(guard_enabled=True), {"samples": rows})
+        available = metrics(AIRSIM_BACKEND, run.result)
+        self.assertIn("守卫距离", available)
+        self.assertIn("预测综合风险", available)
+        residual, _, label = chart_data([run], "北向残差动作")
+        self.assertEqual(residual[0].points, ((0.0, -0.5),))
+        self.assertEqual(label, "归一化动作")
+        trajectory, _, _ = chart_data([run], TRAJECTORY)
+        self.assertEqual([series.name for series in trajectory], ["本次真值", "本次估计", "本次无人机"])
+        self.assertTrue(trajectory[2].dotted)
+        self.assertEqual(trajectory[2].points, ((-10.0, -2.0),))
+        effort, _, label = chart_data([run], "控制代价")
+        self.assertEqual(effort[0].points, ((0.0, 0.002),))
+        self.assertIn("均方速度", label)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "guard.csv"
+            export_csv(output, [run])
+            with output.open(encoding="utf-8-sig", newline="") as stream:
+                saved = next(csv.DictReader(stream))
+        self.assertEqual(saved["guard"], "1")
+        self.assertEqual(saved["uav_north_m"], "-2.0")
